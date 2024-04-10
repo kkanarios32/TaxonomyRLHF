@@ -3,6 +3,34 @@ import re
 
 import ftfy
 from datasets import load_dataset
+import json
+
+from utils import gcs
+
+
+def tldr_generator(mode, seed=0, shuffle=False, comm=None):
+    random.seed(seed)
+
+    if mode == 'test':
+        mode = 'valid' # validation set serves as training set, since we don't have access..
+    assert mode in ['train', 'valid']
+
+    with open(gcs.download_file_cached(
+                f'https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered/{mode}.json',
+                comm=comm)
+              ) as f:
+        datas = json.load(f)
+
+    if shuffle:
+        random.seed(seed)
+        random.shuffle(datas)
+
+    for data in datas:
+        text = data['content']
+        text = ftfy.fix_text(text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+        yield text
 
 
 # bookcorpus dataset, modified from
@@ -50,20 +78,6 @@ def cnndm_generator(mode, seed=0, shuffle=False):
         yield text
 
 
-# TL;DR dataset, modified from
-# https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/datasets/tldr.py
-def tldr_generator(mode, seed=0, shuffle=False):
-    dataset = load_dataset("webis/tldr-17", split=mode)
-
-    if shuffle:
-        random.seed(seed)
-        dataset = dataset.shuffle(seed)
-
-    for _, data in enumerate(dataset):
-        text = data["content"]
-        yield text
-
-
 # for testing only
 def dummy_generator(mode, seed=0, shuffle=False):
     while True:
@@ -76,3 +90,6 @@ DATASET = {
     "tldr": tldr_generator,
     "dummy": dummy_generator,
 }
+
+sample = tldr_generator("train", seed=0, shuffle=True)
+print(sample)
