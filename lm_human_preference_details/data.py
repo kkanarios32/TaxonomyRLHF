@@ -4,54 +4,27 @@ import re
 import ftfy
 from datasets import load_dataset
 import json
-import tqdm
+from tqdm import tqdm
 from utils import blobs
-import jax
-
 
 def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
     assert split in ["test", "train", "valid"]
 
-    gcs_path = f"https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered/{split}.jsonl"
-    with blobs.open_file_cached(gcs_path, "rb") as f:
-        datas = []
-        for l in tqdm(f.readlines()):
-            datas.append(json.loads(l))
-    print("dataset obtained inside gen")
+    with open("train.jsonl") as f:
+        datas = list(f)
     
     if shuffle:
-        key = jax.random.PRNGKey(seed)
-        jax.random.permutation(key, datas)
+        random.seed(seed)
+        random.shuffle(datas)
 
     for data in datas:
+        data = json.loads(data)
         subreddit = "SUBREDDIT: r/" + data['subreddit']
         title = "\n\nTITLE: " + data['title']
         post = "\n\nPOST: " + data['post'] + "\n\nTL;DR:"
         query = subreddit + title + post
         summary = data['summary']
         yield query, summary
-
-
-def tldr_filtered_generator(split, seed=0, shuffle=False):
-    assert split in ["test", "train", "valid"]
-
-    gcs_path = f"https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered_queries/{split}.jsonl"
-    with blobs.open_file_cached(gcs_path, "rb") as f:
-        datas = []
-        for l in tqdm(f.readlines()):
-            datas.append(json.loads(l))
-            
-    if shuffle:
-        key = jax.random.PRNGKey(seed)
-        jax.random.permutation(key, datas)
-
-    for data in datas:
-        # NOTE: don't use ref summary, not filtered
-        subreddit = "SUBREDDIT: r/" + data['subreddit']
-        title = "\n\nTITLE: " + data['title']
-        post = "\n\nPOST: " + data['post'] + "\n\nTL;DR:"
-        query = subreddit + title + post
-        yield query
 
 
 # bookcorpus dataset, modified from
@@ -108,7 +81,6 @@ def dummy_generator(mode, seed=0, shuffle=False):
 DATASET = {
     "books": books_generator,
     "cnndm": cnndm_generator,
-    "tldr": tldr_filtered_generator,
     "tldr-sft": tldr_filtered_sft_generator,
     "dummy": dummy_generator,
 }

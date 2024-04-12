@@ -2,6 +2,7 @@ models
 slurm
 wandb
 runs
+train.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

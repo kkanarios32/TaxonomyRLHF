@@ -39,7 +39,7 @@ class MySFTDataset(IterableDataset):
 
             query_output = self.tokenizer.pad(
                 {"input_ids": query_tokens},
-                padding="max_length",
+                padding=False,
                 max_length=self.query_length,
                 return_tensors="np",
                 return_attention_mask=False,
@@ -57,14 +57,15 @@ tokenizer = AutoTokenizer.from_pretrained(
         "gpt2",
         padding_side="right",
     )
+tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
 print("tokenizer initialized")
 
 dataset = MySFTDataset(
         DATASET["tldr-sft"],
         tokenizer,
-        512,
-        seed=1,
+        530,
+        seed=12,
         start_text=None,
         end_text=None,
     )
@@ -73,6 +74,10 @@ print("dataset generated")
 dataset = iter(dataset)
 
 print("dataset iterable created")
-query, response = next(dataset)
-print("query and response sampled")
-print(query.shape)
+query_shapes=[]
+
+for i in range(100):
+    query, response = next(dataset)
+    query_shapes.append(query.shape[0])
+
+print(max(query_shapes), sum(query_shapes)/len(query_shapes))

@@ -78,5 +78,6 @@ def open_file_cached(path, mode="r"):
     """ Given a GCS path url, caches the contents locally.
     WARNING: only use this function if contents under the path won't change!
     """
-    with bf.BlobFile(path, mode=mode, cache_dir="/tmp/bf-file-cache", streaming=False) as f:
+    bf.configure(connect_timeout=30)
+    with bf.BlobFile(path, mode=mode, cache_dir="/home/ckausik/TaxonomyRLHF/lm_human_preference_details/tmp/bf-file-cache", streaming=False) as f:
         yield f

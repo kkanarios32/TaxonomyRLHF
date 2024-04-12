@@ -277,7 +277,7 @@ class MyDataset(IterableDataset):
         self.end_token = token_to_index[end_text] if self.end_text else None
 
     def __iter__(self):
-        for text in self.generator("train", self.seed, shuffle=True):
+        for text in self.generator("train", self.seed, shuffle=False):
             tokens = self.tokenizer.encode(text)
             if self.start_token is not None:
                 try:
