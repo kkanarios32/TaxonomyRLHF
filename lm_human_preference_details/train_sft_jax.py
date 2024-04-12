@@ -1,8 +1,11 @@
 from torch.utils.data import IterableDataset
+from transformers import AutoTokenizer, FlaxAutoModelForCausalLM, GenerationConfig
+from lm_human_preference_details.data import DATASET
 
+print("imports done")
 
 # a pytorch dataset
-class MyDataset(IterableDataset):
+class MySFTDataset(IterableDataset):
     def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None):
         self.generator = generator
         self.tokenizer = tokenizer
@@ -48,3 +51,28 @@ class MyDataset(IterableDataset):
                                              truncation=True)
 
             yield query_output["input_ids"], response_output["input_ids"]
+
+print("read the function")
+tokenizer = AutoTokenizer.from_pretrained(
+        "gpt2",
+        padding_side="right",
+    )
+
+print("tokenizer initialized")
+
+dataset = MySFTDataset(
+        DATASET["tldr-sft"],
+        tokenizer,
+        512,
+        seed=1,
+        start_text=None,
+        end_text=None,
+    )
+
+print("dataset generated")
+dataset = iter(dataset)
+
+print("dataset iterable created")
+query, response = next(dataset)
+print("query and response sampled")
+print(query.shape)
