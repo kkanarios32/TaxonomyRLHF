@@ -58,7 +58,7 @@ class SFTParams:
 class TaskHParams:
     # Query params
     query_length: int = 64
-    query_dataset: str = "books"
+    query_dataset: str = "tldr-sft"
     query_prefix: str = ""
     query_suffix: str = ""
     start_text: Optional[str] = None
@@ -211,30 +211,40 @@ class MySFTDataset(IterableDataset):
         self.end_token = token_to_index[end_text] if self.end_text else None
 
     def __iter__(self):
-        for text in self.generator("train", self.seed, shuffle=True):
-            tokens = self.tokenizer.encode(text)
+        for query, response in self.generator("train", self.seed, shuffle=True):
+            query_tokens = self.tokenizer.encode(query)
+
             if self.start_token is not None:
                 try:
-                    first_index = tokens.index(self.start_token) + 1
-                    if first_index < len(tokens):
-                        tokens = tokens[first_index:]
+                    first_index = query_tokens.index(self.start_token) + 1
+                    if first_index < len(query_tokens):
+                        query_tokens = query_tokens[first_index:]
                 except:
                     continue
-            tokens = tokens[: self.query_length]
+
+            query_tokens = query_tokens[: self.query_length]
             if self.end_token is not None:
                 try:
-                    last_index = len(tokens) - tokens[::-1].index(self.end_token)
-                    tokens = tokens[:last_index]
+                    last_index = len(query_tokens) - query_tokens[::-1].index(self.end_token)
+                    query_tokens = query_tokens[:last_index]
                 except:
                     continue
-            output = self.tokenizer.pad(
-                {"input_ids": tokens},
+
+            query_output = self.tokenizer.pad(
+                {"input_ids": query_tokens},
                 padding="max_length",
                 max_length=self.query_length,
                 return_tensors="np",
                 return_attention_mask=False,
             )
-            yield output["input_ids"]
+
+            max_length = self.tokenizer.model_max_length - self.query_length
+            response_output = self.tokenizer(response,
+                                             max_length=max_length,
+                                             truncation=True)
+
+            yield query_output["input_ids"], response_output["input_ids"]
+
 
 
 def numpy_collate(batch):
@@ -457,7 +467,7 @@ def train(args: Args):
     policy_state = TrainState.create(apply_fn=policy_forward, params=policy_params, tx=optimizer)
     policy_state = jax_utils.replicate(policy_state)
 
-    dataset = MyDataset(
+    dataset = MySFTDataset(
         DATASET[args.task.query_dataset],
         tokenizer,
         args.task.query_length,
