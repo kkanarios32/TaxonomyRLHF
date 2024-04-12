@@ -26,6 +26,7 @@ orbax = "0.1.4"
 einops = "^0.6.1"
 black = "^23.7.0"
 clu = "^0.0.9"
+blobfile = "^2.1.1"
 
 
 [tool.poetry.group.dev.dependencies]

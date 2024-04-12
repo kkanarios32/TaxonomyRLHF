@@ -5,32 +5,39 @@ import ftfy
 from datasets import load_dataset
 import json
 
-from utils import gcs
+from utils import blobs
 
 
-def tldr_generator(mode, seed=0, shuffle=False, comm=None):
-    random.seed(seed)
+def tldr_filtered_sft_generator(split):
+    assert split in ["test", "train", "valid"]
 
-    if mode == 'test':
-        mode = 'valid' # validation set serves as training set, since we don't have access..
-    assert mode in ['train', 'valid']
-
-    with open(gcs.download_file_cached(
-                f'https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered/{mode}.json',
-                comm=comm)
-              ) as f:
-        datas = json.load(f)
-
-    if shuffle:
-        random.seed(seed)
-        random.shuffle(datas)
+    gcs_path = f"https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered/{split}.jsonl"
+    with blobs.open_file_cached(gcs_path, "rb") as f:
+        datas = [json.loads(l) for l in f.readlines()]
 
     for data in datas:
-        text = data['content']
-        text = ftfy.fix_text(text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = text.strip()
-        yield text
+        subreddit = "SUBREDDIT: r/" + data['subreddit']
+        title = "\n\nTITLE: " + data['title']
+        post = "\n\nPOST: " + data['post'] + "\n\nTL;DR:"
+        query = subreddit + title + post
+        summary = data['summary']
+        yield query, summary
+
+
+def tldr_filtered_generator(split):
+    assert split in ["test", "train", "valid"]
+
+    gcs_path = f"https://openaipublic.blob.core.windows.net/summarize-from-feedback/datasets/tldr_3_filtered_queries/{split}.jsonl"
+    with blobs.open_file_cached(gcs_path, "rb") as f:
+        datas = [json.loads(l) for l in f.readlines()]
+
+    for data in datas:
+        # NOTE: don't use ref summary, not filtered
+        subreddit = "SUBREDDIT: r/" + data['subreddit']
+        title = "\n\nTITLE: " + data['title']
+        post = "\n\nPOST: " + data['post'] + "\n\nTL;DR:"
+        query = subreddit + title + post
+        yield query
 
 
 # bookcorpus dataset, modified from
@@ -87,9 +94,7 @@ def dummy_generator(mode, seed=0, shuffle=False):
 DATASET = {
     "books": books_generator,
     "cnndm": cnndm_generator,
-    "tldr": tldr_generator,
+    "tldr": tldr_filtered_generator,
+    "tldr-sft": tldr_filtered_sft_generator,
     "dummy": dummy_generator,
 }
-
-sample = tldr_generator("train", seed=0, shuffle=True)
-print(sample)
