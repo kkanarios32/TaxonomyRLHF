@@ -350,7 +350,7 @@ def train_step(
     policy_state,
     sft_stats,
     mb_query_responses,
-    args,
+    args
 ):
     def sft_loss(params):
         output = policy_state.apply_fn(params, mb_query_responses)
@@ -472,190 +472,64 @@ def train(args: Args):
     )
     iter_dataloader = iter(dataloader)
 
-    def train_update(policy_state, input_ids, sft_stats):
+    def train_update(policy_state, input_ids, response_ids, sft_stats):
         queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
 
-        query_responses = policy_generate(
-            params=policy_state.params.lm_backbone_params,
-            queries=queries,
-        )
-        # query_responses: [local_batch_size, query_length + response_length]
-        responses = query_responses[:, args.task.query_length :]
+        query_responses = jnp.concatenate((input_ids, response_ids), axis=1)
+       
+        def sft_single_microbatch(carry, inp):
+            policy_state, sft_stats = carry
+            mb_query_responses = inp
 
-        output, full_values = policy_forward(policy_state.params, query_responses)
-        values = full_values[:, args.task.query_length - 1 : -1].squeeze(-1)
-        # values: [local_batch_size, response_length]
-        logits = output.logits[:, args.task.query_length - 1 : -1, :]
-        # logits: [local_batch_size, response_length, vocab_size]
-        logits /= args.task.temperature
-        all_logprobs = jax.nn.log_softmax(logits, axis=-1)
-        # all_logprobs: [local_batch_size, response_length, vocab_size]
-        logprobs = jnp.take_along_axis(all_logprobs, responses[..., None], -1).squeeze(-1)
-        # logprobs: [local_batch_size, response_length]
-
-        ref_output, _ = policy_forward(ref_policy_params, query_responses)
-        ref_logits = ref_output.logits[:, args.task.query_length - 1 : -1, :]
-        # ref_logits: [local_batch_size, response_length, vocab_size]
-        ref_logits /= args.task.temperature
-        ref_all_logprobs = jax.nn.log_softmax(ref_logits, axis=-1)
-        ref_logprobs = jnp.take_along_axis(ref_all_logprobs, responses[..., None], -1).squeeze(-1)
-        # ref_logprobs: [local_batch_size, response_length]
-
-        # **Response Processing**
-        # 1. truncate at the first occurrence of `truncate_token` that appears at or after
-        # position truncate_after in the responses
-        # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L378
-        truncate_token_mask = responses == args.task.truncate_token
-        truncate_after_or_token_mask = jnp.concatenate(
-            [
-                jnp.zeros_like(truncate_token_mask)[:, : args.task.truncate_after],
-                truncate_token_mask[:, args.task.truncate_after :],
-            ],
-            axis=1,
-        )
-        truncate_mask = (jnp.cumsum(truncate_after_or_token_mask, axis=1) - truncate_after_or_token_mask).astype("bool")
-        postprocessed_responses = jnp.where(
-            truncate_mask,
-            jnp.full_like(responses, tokenizer.pad_token_id),
-            responses,
-        )
-
-        # 2. run reward model on the truncated responses
-        postprocessed_query_responses = jnp.concatenate((queries, postprocessed_responses), axis=1)
-        postprocessed_query_responses = right_padding_to_left_padding(postprocessed_query_responses, tokenizer.pad_token_id)
-        scores = reward_forward(query_responses_ids=postprocessed_query_responses).flatten()
-
-        # 3. filter response. Ensure that the sample contains truncate_token
-        # responses not passing that filter will receive a low (fixed) score
-        # only query humans on responses that pass that filter
-        matches_token = postprocessed_responses[:, args.task.truncate_after :] == args.task.truncate_token
-        filter_mask = jnp.any(matches_token, axis=-1)
-
-        scores = jnp.where(
-            filter_mask,
-            scores,
-            jnp.full_like(scores, args.task.penalty_reward_value),
-        )
-
-        # 4. compute rewards
-        kl = logprobs - ref_logprobs
-        non_score_reward = -kl_ctl_value * kl
-        rewards = non_score_reward
-        rewards = rewards.at[:, -1].add(scores)
-
-        # 5. whiten rewards
-        if args.ppo.whiten_rewards:
-            rewards = whiten(rewards, shift_mean=False)
-
-        # 6. compute advantages and returns
-        def compute_gae_once(carry, inp):
-            advantages = carry
-            nextdone, nextvalues, curvalues, reward = inp
-            nextnonterminal = 1.0 - nextdone
-
-            delta = reward + args.ppo.gamma * nextvalues * nextnonterminal - curvalues
-            advantages = delta + args.ppo.gamma * args.ppo.lam * nextnonterminal * advantages
-            return advantages, advantages
-
-        extended_values = jnp.concatenate((values, jnp.zeros((args.ppo.local_batch_size, 1))), axis=1)
-        dones = jnp.zeros_like(rewards)
-        dones = dones.at[:, -1].set(1.0)
-
-        advantages = jnp.zeros((args.ppo.local_batch_size,))
-        _, advantages = jax.lax.scan(
-            compute_gae_once,
-            advantages,
-            (dones.T, extended_values[:, 1:].T, extended_values[:, :-1].T, rewards.T),
-            reverse=True,
-        )
-
-        advantages = advantages.T
-        returns = advantages + values
-        advantages = whiten(advantages)
-
-        def ppo_single_microbatch(carry, inp):
-            policy_state, rl_stats = carry
-            mb_advantages, mb_returns, mb_values, mb_query_responses, mb_logprobs = inp
-
-            policy_state, rl_stats = train_step(
+            policy_state, sft_stats = train_step(
                 policy_state=policy_state,
-                rl_stats=rl_stats,
-                mb_advantages=mb_advantages,
-                mb_returns=mb_returns,
-                mb_values=mb_values,
+                sft_stats=sft_stats,
                 mb_query_responses=mb_query_responses,
-                mb_logprobs=mb_logprobs,
-                args=args,
+                args=args
             )
-            return (policy_state, rl_stats), None
+            return (policy_state, sft_stats), None
 
-        def ppo_single_epoch(carry, inp):
-            policy_state, rl_stats, key = carry
+        def sft_single_epoch(carry, inp):
+            policy_state, sft_stats, key = carry
             key, subkey = jax.random.split(key, 2)
-            perm = jax.random.permutation(key, args.ppo.local_batch_size)
-            # advantages, returns, values, query_responses, logprobs = inp
-            mbs_advantages = einops.rearrange(
-                advantages[perm],
-                "(c m) l -> c m l",
-                c=args.ppo.gradient_accumulation_steps,
-            )
-            mbs_returns = einops.rearrange(
-                returns[perm],
-                "(c m) l -> c m l",
-                c=args.ppo.gradient_accumulation_steps,
-            )
-            mbs_values = einops.rearrange(values[perm], "(c m) l -> c m l", c=args.ppo.gradient_accumulation_steps)
+            perm = jax.random.permutation(key, args.sft.local_batch_size)
+            # That is -> query_responses, logprobs = inp
+            
             mbs_query_responses = einops.rearrange(
                 query_responses[perm],
                 "(c m) l -> c m l",
-                c=args.ppo.gradient_accumulation_steps,
+                c=args.sft.gradient_accumulation_steps,
             )
             mbs_logprobs = einops.rearrange(
                 logprobs[perm],
                 "(c m) l -> c m l",
-                c=args.ppo.gradient_accumulation_steps,
+                c=args.sft.gradient_accumulation_steps,
             )
-            (policy_state, rl_stats), _ = jax.lax.scan(
-                f=ppo_single_microbatch,
-                init=(policy_state, rl_stats),
+            (policy_state, sft_stats), _ = jax.lax.scan(
+                f=sft_single_microbatch,
+                init=(policy_state, sft_stats),
                 xs=(
-                    mbs_advantages,
-                    mbs_returns,
-                    mbs_values,
                     mbs_query_responses,
                     mbs_logprobs,
                 ),
             )
-            return (policy_state, rl_stats, key), None
+            return (policy_state, sft_stats, key), None
 
         key = jax.random.PRNGKey(args.seed)
-        # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
-        (policy_state, rl_stats, _), _ = jax.lax.scan(
-            f=ppo_single_epoch,
-            init=(policy_state, rl_stats, key),
+        # Do multiple epochs of sft training, with a fresh random shuffle in each epoch
+        (policy_state, sft_stats, _), _ = jax.lax.scan(
+            f=sft_single_epoch,
+            init=(policy_state, sft_stats, key),
             xs=None,
-            length=args.ppo.noptepochs,
+            length=args.sft.noptepochs,
         )
 
-        rollout_stats = dict(
-            mean_kl=jax.lax.pmean(kl.sum(-1).mean(), "batch"),
-            mean_entropy=jax.lax.pmean((-logprobs).sum(-1).mean(), "batch"),
-            mean_non_score_reward=jax.lax.pmean(non_score_reward.sum(-1).mean(), "batch"),
-            mean_scores=jax.lax.pmean(scores.mean(), "batch"),
-            mean_returns=jax.lax.pmean(returns.mean(), "batch"),
-            var_returns=jax.lax.pmean(returns.var(), "batch"),
-            mean_values=jax.lax.pmean(values.mean(), "batch"),
-            var_values=jax.lax.pmean(values.var(), "batch"),
-            mean_advantages=jax.lax.pmean(advantages.mean(), "batch"),
-        )
-        rl_stats = jax.lax.pmean(rl_stats.compute(), "batch")
+        sft_stats = jax.lax.pmean(sft_stats.compute(), "batch")
 
         samples_to_print = dict(
-            query_response=query_responses[0],
-            kl=kl[0].sum(),
-            scores=scores[0].sum(),
+            query_response=query_responses[0]
         )
-        return policy_state, rollout_stats, rl_stats, samples_to_print
+        return policy_state, sft_stats, samples_to_print
 
     p_train_update = jax.pmap(
         train_update,
@@ -666,66 +540,37 @@ def train(args: Args):
     print("===training policy===")
     global_step = 0
 
-    for update in range(1, args.ppo.num_updates + 1):
-        global_step += args.ppo.batch_size
-        input_ids = next(iter_dataloader)
+    for update in range(1, args.sft.num_updates + 1):
+        global_step += args.sft.batch_size
+        [input_ids, response_ids] = next(iter_dataloader)
         input_ids = common_utils.shard(input_ids)
-        rl_stats = jax_utils.replicate(RLStatistics.empty())
-        policy_state, rollout_stats, rl_stats, samples_to_print = p_train_update(
+        response_ids = common_utils.shard(response_ids)
+        sft_stats = jax_utils.replicate(SFTStatistics.empty())
+        policy_state, sft_stats, samples_to_print = p_train_update(
             policy_state=policy_state,
             input_ids=input_ids,
-            rl_stats=rl_stats,
-            kl_ctl_value=np.array([kl_ctl.value] * input_ids.shape[0]),
+            response_ids = response_ids,
+            sft_stats=sft_stats
         )
 
         try:
-            sample_kl = samples_to_print["kl"][0].item()
-            sample_score = samples_to_print["scores"][0].item()
             sample_query_response = samples_to_print["query_response"][0]
             console.print(
                 f"[green][bold]{'Query'}:[/]\n"
                 + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
                 + f"[yellow][bold]{'Response'}:[/]\n"
-                + f"[yellow]{tokenizer.decode(sample_query_response[args.task.query_length:], skip_special_tokens=True)}[/]\n\n"
-                + f"[red]score: {sample_score}, kl: {sample_kl}, total reward: {sample_score - kl_ctl.value * sample_kl} [/]"
-            )
+                )
         except Exception as e:
             print(e)
 
-        # Rollout metrics
-        rollout_stats = common_utils.get_metrics([rollout_stats])
-        writer.add_scalar("objective/kl", rollout_stats["mean_kl"].item(), update)
-        writer.add_scalar("objective/entropy", rollout_stats["mean_entropy"].item(), update)
-        writer.add_scalar("objective/non_score_reward", rollout_stats["mean_non_score_reward"].item(), update)
-        writer.add_scalar(
-            "objective/score_total",
-            rollout_stats["mean_non_score_reward"].item() + rollout_stats["mean_scores"].item(),
-            update,
-        )
-        writer.add_scalar("objective/scores", rollout_stats["mean_scores"].item(), update)
-        writer.add_scalar("ppo/returns/mean", rollout_stats["mean_returns"].item(), update)
-        writer.add_scalar("ppo/returns/var", rollout_stats["var_returns"].item(), update)
-        writer.add_scalar("ppo/val/mean", rollout_stats["mean_values"].item(), update)
-        writer.add_scalar("ppo/val/var", rollout_stats["var_values"].item(), update)
-        writer.add_scalar("ppo/val/advantage", rollout_stats["mean_advantages"].item(), update)
-
+        
         # RL metrics aggregated at the batch level
-        rl_stats = common_utils.get_metrics([rl_stats])
-        writer.add_scalar("ppo/policy/approxkl_avg", rl_stats["approxkl"].item(), update)
-        writer.add_scalar("ppo/policy/entropy_avg", rl_stats["entropy"].item(), update)
-        writer.add_scalar("ppo/loss/policy_avg", rl_stats["pg_loss"].item(), update)
-        writer.add_scalar("ppo/policy/clipfrac_avg", rl_stats["pg_clipfrac"].item(), update)
-        writer.add_scalar("ppo/val/error", rl_stats["vf_loss1"].item(), update)
-        writer.add_scalar("ppo/loss/value_avg", rl_stats["vf_loss"].item(), update)
-        writer.add_scalar("ppo/val/clipfrac_avg", rl_stats["vf_clipfrac"].item(), update)
-        writer.add_scalar("ppo/val/ratio_avg", rl_stats["ratio"].item(), update)
-        writer.add_scalar("ppo/loss/total", rl_stats["loss"].item(), update)
+        sft_stats = common_utils.get_metrics([sft_stats])
+        writer.add_scalar("sft/loss/total", sft_stats["loss"].item(), update)
 
         # Logging learning rate and learning progress
-        writer.add_scalar("ppo/lr", policy_state.opt_state.inner_opt_state.hyperparams["learning_rate"][0].item(), update)
-        writer.add_scalar("ppo/episode", global_step, update)
-        writer.add_scalar("objective/kl_coef", np.array(kl_ctl.value), update)
-        kl_ctl.update(rollout_stats["mean_kl"].item(), args.ppo.batch_size)
+        writer.add_scalar("sft/lr", policy_state.opt_state.inner_opt_state.hyperparams["learning_rate"][0].item(), update)
+        writer.add_scalar("sft/episode", global_step, update)
 
     policy_state = jax_utils.unreplicate(policy_state)
     # save model
