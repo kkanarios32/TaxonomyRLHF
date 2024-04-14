@@ -33,7 +33,7 @@ from lm_human_preference_details.data import DATASET
 @dataclass
 class SFTParams:
     #Batch Size stuff
-    local_batch_size: int = 64
+    local_batch_size: int = 8
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
@@ -55,9 +55,9 @@ class SFTParams:
     
 
 @dataclass
-class TaskHParams:
+class TaskParams:
     # Query params
-    query_length: int = 64
+    query_length: int = 600
     query_dataset: str = "tldr-sft"
     query_prefix: str = ""
     query_suffix: str = ""
@@ -65,7 +65,7 @@ class TaskHParams:
     end_text: Optional[str] = None
 
     # Response params
-    response_length: int = 24
+    response_length: int = 400
 
     # Truncate response after the first occurrence of this token at or after index after when sampling.
     truncate_token: int = 13
@@ -238,12 +238,17 @@ class MySFTDataset(IterableDataset):
                 return_attention_mask=False,
             )
 
-            max_length = self.tokenizer.model_max_length - self.query_length
-            response_output = self.tokenizer(response,
-                                             max_length=max_length,
-                                             truncation=True)
+            max_response_length = self.tokenizer.model_max_length - self.query_length
+            response_tokens = self.tokenizer.encode(response, max_length=max_response_length,
+                                                 truncation=True)
+            response_output = self.tokenizer.pad({"input_ids": response_tokens},
+                                                 padding="max_length",
+                                                 max_length=max_response_length,
+                                                 return_tensors = "np",
+                                                 return_attention_mask=False
+                                                )
 
-            yield query_output["input_ids"], response_output["input_ids"]
+            yield query_output["input_ids"], np.squeeze(response_output["input_ids"])
 
 
 
@@ -320,8 +325,7 @@ def prepare_policy_forward_and_policy_generate(args, tokenizer):
             variables=params.lm_backbone_params,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            output_hidden_states=True,
+            position_ids=position_ids
         )
 
         # shape: [batch_size, length, 1]
@@ -368,18 +372,22 @@ def train_step(
         logits = output.logits[:, args.task.query_length - 1 : -1, :]
         logits /= args.task.temperature
         responses = mb_query_responses[:, args.task.query_length :]
-        new_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
         
-        current_sft_stats = dict(loss=new_logprobs)
+        resp_len= len(responses[0])
+        response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
+        
+        sft_loss_val = jnp.sum(response_logprobs)
+        
+        current_sft_stats = dict(loss=sft_loss_val)
 
-        return new_logprobs, current_sft_stats
+        return sft_loss_val, current_sft_stats
 
     grad_fn = jax.value_and_grad(sft_loss, has_aux=True)
     (loss, current_sft_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
     
-    sft_stats = sft_stats.merge(TrainStatistics.gather_from_model_output(**current_sft_stats))
+    sft_stats = sft_stats.merge(SFTStatistics.gather_from_model_output(**current_sft_stats))
 
     return policy_state, sft_stats
 
@@ -444,12 +452,17 @@ def train(args: Args):
     )
     # we use the padding token manually but do not resize the token embedding of the model
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    
+    print("tokenizer initialized")
+    
     (
         policy_forward,
         policy_generate,
         policy_params,
     ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
     ref_policy_params = copy.deepcopy(policy_params)
+    
+    print("policy param initialized")
 
     if args.use_tensorflow_adam:
         adam = adam_tf_style
@@ -463,9 +476,13 @@ def train(args: Args):
         ),
         every_k_schedule=args.sft.gradient_accumulation_steps,
     )
+    
+    print("optimizer initialized")
 
     policy_state = TrainState.create(apply_fn=policy_forward, params=policy_params, tx=optimizer)
     policy_state = jax_utils.replicate(policy_state)
+    
+    print("Train state created")
 
     dataset = MySFTDataset(
         DATASET[args.task.query_dataset],
@@ -475,12 +492,17 @@ def train(args: Args):
         start_text=args.task.start_text,
         end_text=args.task.end_text,
     )
+    
+    print("dataset initialized")
+    
     dataloader = DataLoader(
         dataset,
         batch_size=args.sft.batch_size,
         collate_fn=numpy_collate,
     )
     iter_dataloader = iter(dataloader)
+    
+    print("Iterable dataloader initialized")
 
     def train_update(policy_state, input_ids, response_ids, sft_stats):
         queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
@@ -510,17 +532,12 @@ def train(args: Args):
                 "(c m) l -> c m l",
                 c=args.sft.gradient_accumulation_steps,
             )
-            mbs_logprobs = einops.rearrange(
-                logprobs[perm],
-                "(c m) l -> c m l",
-                c=args.sft.gradient_accumulation_steps,
-            )
+            
             (policy_state, sft_stats), _ = jax.lax.scan(
                 f=sft_single_microbatch,
                 init=(policy_state, sft_stats),
                 xs=(
-                    mbs_query_responses,
-                    mbs_logprobs,
+                    mbs_query_responses
                 ),
             )
             return (policy_state, sft_stats, key), None
@@ -546,13 +563,16 @@ def train(args: Args):
         axis_name="batch",
         donate_argnums=(0,),
     )
+    
+    print("parallelized train update initialized")
 
     print("===training policy===")
     global_step = 0
+    
+    print("starting train loop")
 
-    for update in range(1, args.sft.num_updates + 1):
+    for update, [input_ids, response_ids] in enumerate(iter_dataloader):
         global_step += args.sft.batch_size
-        [input_ids, response_ids] = next(iter_dataloader)
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
         sft_stats = jax_utils.replicate(SFTStatistics.empty())
@@ -582,6 +602,8 @@ def train(args: Args):
         writer.add_scalar("sft/lr", policy_state.opt_state.inner_opt_state.hyperparams["learning_rate"][0].item(), update)
         writer.add_scalar("sft/episode", global_step, update)
 
+    print("finished training")
+    
     policy_state = jax_utils.unreplicate(policy_state)
     # save model
     if args.local_rank == 0:
@@ -597,4 +619,5 @@ def train(args: Args):
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+    print("args initialized")
     train(args)
