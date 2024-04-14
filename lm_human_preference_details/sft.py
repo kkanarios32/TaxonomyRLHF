@@ -379,6 +379,8 @@ def train_step(
         
         sft_loss_val = jnp.sum(response_logprobs)
         
+        print("loss val found")
+        
         current_sft_stats = dict(loss=sft_loss_val)
 
         return sft_loss_val, current_sft_stats

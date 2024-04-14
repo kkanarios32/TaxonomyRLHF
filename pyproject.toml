@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{include = "lm_human_preference_details"}]
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.9"
 torch = "2.0.0"
 tyro = "^0.5.3"
 datasets = "^2.12.0"
