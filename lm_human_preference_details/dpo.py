@@ -301,6 +301,31 @@ class LMBackboneParams:
     """Parameters for the language model backbone."""
 
     lm_backbone_params: flax.core.FrozenDict
+    
+def model_policy_forward(
+        model,
+        input_ids: jnp.ndarray,
+    ):
+        """Get reward for input_ids."""
+        assert input_ids.ndim == 2
+        # shape: [batch_size, length]
+
+        # mask out padding tokens
+        attention_mask = input_ids != tokenizer.pad_token_id
+        input_ids = jnp.where(attention_mask, input_ids, 0)
+
+        # assign position ids
+        position_ids = attention_mask.cumsum(1) - attention_mask
+
+        model_out = model.module.apply(
+            variables=model.params,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids
+        )
+
+        # shape: [batch_size, length, 1]
+        return lm_backbone_out
 
 def prepare_policy_forward_and_policy_generate(args, tokenizer):
     """Prepare the forward pass of the policy model and parameters."""
@@ -376,7 +401,7 @@ class DPOStatistics(metrics.Collection):
 
 def train_step(
     policy_state, # with respect to the current model
-    ref_policy_state, # with respect to the reference model
+    ref_model, # with respect to the reference model
     dpo_stats,
     mb_query_responses_pref,
     mb_query_responses_rej,
@@ -396,8 +421,8 @@ def train_step(
         logits_rej_theta =  output_rej_theta.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
 
         # From reference model
-        output_pref_refm = ref_policy_state.apply_fn(params, mb_query_responses_pref)
-        output_rej_refm = ref_policy_state.apply_fn(params, mb_query_responses_rej)
+        output_pref_refm = model_policy_forward(ref_model, mb_query_responses_pref)
+        output_rej_refm = model_policy_forward(ref_model, mb_query_responses_rej)
         
         logits_pref_refm =  output_pref_refm.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
         logits_rej_refm =  output_rej_refm.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
@@ -519,7 +544,21 @@ def train(args: Args):
         policy_generate,
         policy_params,
     ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
-    ref_policy_params = copy.deepcopy(policy_params)
+    
+    ref_model = FlaxAutoModelForCausalLM.from_pretrained(args.base_model)
+    # disable `pad_token_id` and `eos_token_id` because we just want to
+    # generate tokens without truncation / padding
+    ref_model.generation_config.eos_token_id = None
+    ref_model.generation_config.pad_token_id = tokenizer.pad_token_id
+
+    generation_config = GenerationConfig(
+        max_new_tokens=args.task.response_length,
+        temperature=args.task.temperature,
+        top_k=0.0,
+        top_p=1.0,
+        do_sample=True,
+        pad_token_id=tokenizer.pad_token_id,
+    )
     
     print("policy param initialized")
 
@@ -540,8 +579,6 @@ def train(args: Args):
 
     policy_state = TrainState.create(apply_fn=policy_forward, params=policy_params, tx=optimizer)
     policy_state = jax_utils.replicate(policy_state)
-
-    ref_policy_state = TrainState.create(apply_fn=policy_forward, params=ref_policy_params, tx=optimizer)
     
     print("Train state created")
 
@@ -579,7 +616,7 @@ def train(args: Args):
 
             policy_state, dpo_stats = train_step(
                 policy_state=policy_state,
-                ref_policy_state=ref_policy_state, # added for reference policy
+                ref_model=ref_model, # added for reference policy
                 dpo_stats=dpo_stats,
                 mb_query_responses_pref=mb_query_responses_pref,
                 mb_query_responses_rej=mb_query_responses_rej,
