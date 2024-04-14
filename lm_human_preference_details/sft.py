@@ -363,6 +363,7 @@ def train_step(
     policy_state,
     sft_stats,
     mb_query_responses,
+    tokenizer,
     args
 ):
     def sft_loss(params):
@@ -373,7 +374,7 @@ def train_step(
         responses = mb_query_responses[:, args.task.query_length :]
         
         response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
-        filter_for_pad_logprobs = (response!=tokenizer.pad_token_id)
+        filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
         response_logprobs=response_logprobs*filter_for_pad_logprobs
         
         sft_loss_val = jnp.sum(response_logprobs)
@@ -517,6 +518,7 @@ def train(args: Args):
                 policy_state=policy_state,
                 sft_stats=sft_stats,
                 mb_query_responses=mb_query_responses,
+                tokenizer=tokenizer,
                 args=args
             )
             return (policy_state, sft_stats), None

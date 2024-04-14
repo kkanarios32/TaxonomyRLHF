@@ -131,7 +131,7 @@ response = np.reshape(response, (1,424))
 query_response = jnp.concatenate((query, response), axis=1)
 logits = policy_forward(query_response).logits[:, 600:, :]
 log_probs = -optax.softmax_cross_entropy_with_integer_labels(logits, response)
-filter_num = (response!=tokenizer.pad_token_id)
+filter_num = (response not in [tokenizer.pad_token_id])
 log_probs=log_probs*filter_num
 print(log_probs.reshape(8, 53))
 print(log_probs.shape)
