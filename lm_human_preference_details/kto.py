@@ -216,7 +216,7 @@ class MyKTODataset(IterableDataset):
         self.end_token = token_to_index[end_text] if self.end_text else None
 
     def __iter__(self):
-        for query, response in self.generator("train", self.seed, shuffle=True):
+        for query, response, chosen_label in self.generator("train", self.seed, shuffle=False):
             query_tokens = self.tokenizer.encode(query)
 
             if self.start_token is not None:
@@ -253,7 +253,7 @@ class MyKTODataset(IterableDataset):
                                                  return_attention_mask=False
                                                 )
 
-            yield query_output["input_ids"], np.squeeze(response_output["input_ids"])
+            yield query_output["input_ids"], np.squeeze(response_output["input_ids"]), chosen_label
 
 
 
@@ -285,6 +285,30 @@ def exact_div(a, b):
         raise ValueError(f"Inexact division: {a} / {b} = {a / b}")
     return q
 
+def model_policy_forward(
+        model,
+        input_ids: jnp.ndarray,
+    ):
+        """Get reward for input_ids."""
+        assert input_ids.ndim == 2
+        # shape: [batch_size, length]
+
+        # mask out padding tokens
+        attention_mask = input_ids != model.generation_config.pad_token_id
+        input_ids = jnp.where(attention_mask, input_ids, 0)
+
+        # assign position ids
+        position_ids = attention_mask.cumsum(1) - attention_mask
+
+        model_out = model.module.apply(
+            variables={"params": model.params},
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids
+        )
+
+        # shape: [batch_size, length, 1]
+        return model_out
 
 @flax.struct.dataclass
 class LMBackboneParams:
@@ -556,7 +580,7 @@ def train(args: Args):
         filter_for_pad_logprobs_kl = (response_ids_reversed!=tokenizer.pad_token_id)
         
         # Policy log probs
-        output_policy_kl = jax.lax.stop_gradient(policy_state.apply_fn(params, kl_query_responses))
+        output_policy_kl = jax.lax.stop_gradient(policy_state.apply_fn(policy_state.params, kl_query_responses))
         logits_policy_kl = output_policy_kl.logits[:, args.task.query_length - 1 : -1, :]
         logits_policy_kl /= args.task.temperature
         
@@ -564,7 +588,7 @@ def train(args: Args):
         policy_logprobs_kl=policy_logprobs_kl*filter_for_pad_logprobs_kl
         
         # From reference model
-        output_refm_kl = model_policy_forward(ref_model, mb_query_responses)
+        output_refm_kl = model_policy_forward(ref_model, kl_query_responses)
         logits_refm_kl = output_refm_kl.logits[:, args.task.query_length - 1 : -1, :]
         logits_refm_kl /= args.task.temperature
         
@@ -573,19 +597,19 @@ def train(args: Args):
         
         # Take diff and apply kto val function
         kl_z_ref = policy_logprobs_kl - ref_logprobs_kl
-        assert kl_z_ref.ndim==1
-        kl_z_ref = jnp.mean(kl_z_ref)
-        kl_z_ref = jnp.max([0,kl_z_ref])
+        kl_z_ref = jnp.sum(kl_z_ref)/response_ids.shape[0]
+        kl_z_ref = jnp.max(jnp.array([0,kl_z_ref]))
        
         def kto_single_microbatch(carry, inp):
             policy_state, kto_stats = carry
-            mb_query_responses, kl_z_ref = inp
+            mb_query_responses, mb_chosen_labels, kl_z_ref = inp
 
             policy_state, kto_stats = train_step(
                 policy_state=policy_state,
                 ref_model = ref_model,
                 kto_stats=kto_stats,
                 mb_query_responses=mb_query_responses,
+                mb_chosen_labels= mb_chosen_labels,
                 kl_z_ref = kl_z_ref,
                 tokenizer=tokenizer,
                 args=args
@@ -603,18 +627,23 @@ def train(args: Args):
                 "(c m) l -> c m l",
                 c=args.kto.gradient_accumulation_steps,
             )
+            mbs_chosen_labels = einops.rearrange(
+                chosen_labels[perm],
+                "(c m) -> c m",
+                c=args.kto.gradient_accumulation_steps,
+            )
             
             (policy_state, kto_stats), _ = jax.lax.scan(
                 f=kto_single_microbatch,
                 init=(policy_state, kto_stats),
                 xs=(
-                    mbs_query_responses, kl_z_ref
+                    mbs_query_responses, mbs_chosen_labels, kl_z_ref
                 ),
             )
             return (policy_state, kto_stats, key), None
 
         key = jax.random.PRNGKey(args.seed)
-        # Do multiple epochs of sft training, with a fresh random shuffle in each epoch
+        # Do multiple epochs of kto training, with a fresh random shuffle in each epoch
         (policy_state, kto_stats, _), _ = jax.lax.scan(
             f=kto_single_epoch,
             init=(policy_state, kto_stats, key),
@@ -642,15 +671,17 @@ def train(args: Args):
     
     print("starting train loop")
 
-    for update, [input_ids, response_ids] in enumerate(iter_dataloader):
+    for update, [input_ids, response_ids, chosen_labels] in enumerate(iter_dataloader):
         global_step += args.kto.batch_size
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
+        chosen_labels = common_utils.shard(chosen_labels)
         kto_stats = jax_utils.replicate(KTOStatistics.empty())
         policy_state, kto_stats, samples_to_print = p_train_update(
             policy_state=policy_state,
             input_ids=input_ids,
             response_ids = response_ids,
+            chosen_labels=chosen_labels,
             kto_stats=kto_stats
         )
 

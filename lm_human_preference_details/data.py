@@ -36,8 +36,8 @@ def tldr_kto_random_generator(split="train", seed=0, shuffle=False):
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 
-                       split=f'{split}',
-                       streaming=True,
+                       split=f'{split}[:10]',
+                       streaming=False,
     ).select_columns(['info', 'summaries', 'choice'])
     
     # This gives errors for IterableDatasets
@@ -45,7 +45,7 @@ def tldr_kto_random_generator(split="train", seed=0, shuffle=False):
         random.seed(seed)
         random.shuffle(datas)
 
-    for data in datas[:100]:
+    for data in datas:
         # Don't need below
         # data = json.loads(data)
         choice = random.randint(0,1)
@@ -70,8 +70,8 @@ def tldr_dpo_generator(split="train", seed=0, shuffle=False):
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 
-                       split=f'{split}',
-                       streaming=True,
+                       split=f'{split}[:10]',
+                       streaming=False,
     ).select_columns(['info', 'summaries', 'choice'])
     
     # This gives errors for IterableDatasets
@@ -79,7 +79,7 @@ def tldr_dpo_generator(split="train", seed=0, shuffle=False):
         random.seed(seed)
         random.shuffle(datas)
 
-    for data in datas[:100]:
+    for data in datas:
         # Don't need below
         # data = json.loads(data)
         subreddit = "SUBREDDIT: r/" + data['info']['subreddit']

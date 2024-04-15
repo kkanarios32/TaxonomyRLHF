@@ -311,21 +311,21 @@ def model_policy_forward(
         # shape: [batch_size, length]
 
         # mask out padding tokens
-        attention_mask = input_ids != tokenizer.pad_token_id
+        attention_mask = input_ids != model.generation_config.pad_token_id
         input_ids = jnp.where(attention_mask, input_ids, 0)
 
         # assign position ids
         position_ids = attention_mask.cumsum(1) - attention_mask
 
         model_out = model.module.apply(
-            variables=model.params,
+            variables={"params": model.params},
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids
         )
 
         # shape: [batch_size, length, 1]
-        return lm_backbone_out
+        return model_out
 
 def prepare_policy_forward_and_policy_generate(args, tokenizer):
     """Prepare the forward pass of the policy model and parameters."""
@@ -453,11 +453,11 @@ def train_step(
         ref_logratios = reference_chosen_logps - reference_rejected_logps
 
         temp = pi_logratios - ref_logratios
-
+        temp = jnp.sum(temp, axis=1)
         # dpo_loss = jnp.sum(temp)
         # dpo_loss_val = (dpo_loss - 1/(2*args.dpo.beta)) **2
         
-        dpo_loss = -flax.linen.logsigmoid(beta*temp)
+        dpo_loss = -flax.linen.log_sigmoid(args.dpo.beta*temp)
         assert dpo_loss.n_dim==1
         
         dpo_loss_val = jnp.sum(dpo_loss)
