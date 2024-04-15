@@ -17,7 +17,7 @@ def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
         random.seed(seed)
         random.shuffle(datas)
 
-    for data in datas:
+    for data in datas[:100]:
         data = json.loads(data)
         subreddit = "SUBREDDIT: r/" + data['subreddit']
         title = "\n\nTITLE: " + data['title']
@@ -25,6 +25,40 @@ def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
         query = subreddit + title + post
         summary = data['summary']
         yield query, summary
+        
+        
+def tldr_kto_random_generator(split="train", seed=0, shuffle=False): 
+    """
+    Generator for DPO. Outputs two different summaries: preferred and rejected.
+    """
+
+    assert split in ["test", "train", "valid"]
+
+    datas = load_dataset('openai/summarize_from_feedback',
+                       'comparisons', 
+                       split=f'{split}',
+                       streaming=True,
+    ).select_columns(['info', 'summaries', 'choice'])
+    
+    # This gives errors for IterableDatasets
+    if shuffle:
+        random.seed(seed)
+        random.shuffle(datas)
+
+    for data in datas[:100]:
+        # Don't need below
+        # data = json.loads(data)
+        choice = random.randint(0,1)
+        subreddit = "SUBREDDIT: r/" + data['info']['subreddit']
+        title = "\n\nTITLE: " + data['info']['title']
+        post = "\n\nPOST: " + data['info']['post'] + "\n\nTL;DR:"
+        query = subreddit + title + post
+
+        # For two different summaries
+        summary = data['summaries'][choice]['text']
+        chosen_label = True if (choice==data['choice']) else False
+
+        yield query, summary, chosen_label
 
 
 def tldr_dpo_generator(split="train", seed=0, shuffle=False): 
@@ -45,7 +79,7 @@ def tldr_dpo_generator(split="train", seed=0, shuffle=False):
         random.seed(seed)
         random.shuffle(datas)
 
-    for data in datas:
+    for data in datas[:100]:
         # Don't need below
         # data = json.loads(data)
         subreddit = "SUBREDDIT: r/" + data['info']['subreddit']
@@ -116,5 +150,6 @@ DATASET = {
     "cnndm": cnndm_generator,
     "tldr-sft": tldr_filtered_sft_generator,
     "tldr-dpo": tldr_dpo_generator,
+    "tldr-kto-random": tldr_kto_random_generator,
     "dummy": dummy_generator,
 }

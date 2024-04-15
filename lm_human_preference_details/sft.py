@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+from tqdm import tqdm
 
 import einops
 import flax
@@ -379,8 +380,6 @@ def train_step(
         
         sft_loss_val = jnp.sum(response_logprobs)
         
-        print("loss val found")
-        
         current_sft_stats = dict(loss=sft_loss_val)
 
         return sft_loss_val, current_sft_stats
@@ -575,7 +574,7 @@ def train(args: Args):
     
     print("starting train loop")
 
-    for update, [input_ids, response_ids] in enumerate(iter_dataloader):
+    for update, [input_ids, response_ids] in tqdm(enumerate(iter_dataloader)):
         global_step += args.sft.batch_size
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
@@ -587,15 +586,15 @@ def train(args: Args):
             sft_stats=sft_stats
         )
 
-        try:
-            sample_query_response = samples_to_print["query_response"][0]
-            console.print(
-                f"[green][bold]{'Query'}:[/]\n"
-                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-                + f"[yellow][bold]{'Response'}:[/]\n"
-                )
-        except Exception as e:
-            print(e)
+        # try:
+        #     sample_query_response = samples_to_print["query_response"][0]
+        #     console.print(
+        #         f"[green][bold]{'Query'}:[/]\n"
+        #         + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+        #         + f"[yellow][bold]{'Response'}:[/]\n"
+        #         )
+        # except Exception as e:
+        #     print(e)
 
         
         # RL metrics aggregated at the batch level

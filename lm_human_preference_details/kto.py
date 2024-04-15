@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+from tqdm import tqdm
 
 import einops
 import flax
@@ -28,11 +29,11 @@ from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, FlaxAutoModelForCausalLM, GenerationConfig
 
-from data import DATASET
+from lm_human_preference_details.data import DATASET
 
 @dataclass
-class DPOParams:
-    # Batch Size stuff
+class KTOParams:
+    #Batch Size stuff
     local_batch_size: int = 8
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
@@ -52,23 +53,24 @@ class DPOParams:
     noptepochs: int = 4
     lr: float = 0.00001
     eps: float = 1e-5
-
-    # DPO params
-    beta: float = 0.5 # as suggested in the DPO paper
-   
-
+    
+    # Params for KTO
+    lam_D = 1.2
+    lam_U = 1
+    beta = 0.1
+    
 @dataclass
 class TaskParams:
     # Query params
-    query_length: int = 471 # Changed for DPO
-    query_dataset: str = "tldr-dpo" # Changed for DPO
+    query_length: int = 600
+    query_dataset: str = "tldr-kto-random"
     query_prefix: str = ""
     query_suffix: str = ""
     start_text: Optional[str] = None
     end_text: Optional[str] = None
 
     # Response params
-    response_length: int = 81 # Changed for DPO
+    response_length: int = 400
 
     # Truncate response after the first occurrence of this token at or after index after when sampling.
     truncate_token: int = 13
@@ -77,7 +79,6 @@ class TaskParams:
 
     # LM params
     temperature: float = 0.7
-
 
 
 @dataclass
@@ -92,7 +93,7 @@ class Args:
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     
-    wandb_project_name: str = "dpotrain"
+    wandb_project_name: str = "ktotrain"
     """the wandb's project name"""
     
     wandb_entity: Optional[str] = None
@@ -104,20 +105,20 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2" # I will probably need to change to the SFT model
+    base_model: str = "gpt2"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "dpo_models/"
+    save_path: str = "ktomodels/"
     """Where to save the model"""
     
     use_tensorflow_adam: bool = True
     """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
     
     task: TaskParams = field(default_factory=TaskParams)
-    dpo: DPOParams = field(default_factory=DPOParams)
+    kto: KTOParams = field(default_factory=KTOParams)
 
     # distributed settings
     local_rank: int = 0
@@ -202,7 +203,7 @@ def adam_tf_style(
     )
 
 # a pytorch dataset
-class MyDPODataset(IterableDataset):
+class MyKTODataset(IterableDataset):
     def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None):
         self.generator = generator
         self.tokenizer = tokenizer
@@ -215,7 +216,7 @@ class MyDPODataset(IterableDataset):
         self.end_token = token_to_index[end_text] if self.end_text else None
 
     def __iter__(self):
-        for query, response_pref, response_rej in self.generator("train", self.seed, shuffle=False):
+        for query, response in self.generator("train", self.seed, shuffle=True):
             query_tokens = self.tokenizer.encode(query)
 
             if self.start_token is not None:
@@ -243,28 +244,17 @@ class MyDPODataset(IterableDataset):
             )
 
             max_response_length = self.tokenizer.model_max_length - self.query_length
-
-            # For preferred responses
-            response_tokens_pref = self.tokenizer.encode(response_pref, max_length=max_response_length,
+            response_tokens = self.tokenizer.encode(response, max_length=max_response_length,
                                                  truncation=True)
-            response_output_pref = self.tokenizer.pad({"input_ids": response_tokens_pref},
-                                                 padding="max_length",
-                                                 max_length=max_response_length,
-                                                 return_tensors = "np",
-                                                 return_attention_mask=False
-                                                )
-            
-            # For rejected responses
-            response_tokens_rej = self.tokenizer.encode(response_rej, max_length=max_response_length,
-                                                 truncation=True)
-            response_output_rej = self.tokenizer.pad({"input_ids": response_tokens_rej},
+            response_output = self.tokenizer.pad({"input_ids": response_tokens},
                                                  padding="max_length",
                                                  max_length=max_response_length,
                                                  return_tensors = "np",
                                                  return_attention_mask=False
                                                 )
 
-            yield query_output["input_ids"], np.squeeze(response_output_pref["input_ids"]), np.squeeze(response_output_rej["input_ids"])
+            yield query_output["input_ids"], np.squeeze(response_output["input_ids"])
+
 
 
 def numpy_collate(batch):
@@ -301,31 +291,6 @@ class LMBackboneParams:
     """Parameters for the language model backbone."""
 
     lm_backbone_params: flax.core.FrozenDict
-    
-def model_policy_forward(
-        model,
-        input_ids: jnp.ndarray,
-    ):
-        """Get reward for input_ids."""
-        assert input_ids.ndim == 2
-        # shape: [batch_size, length]
-
-        # mask out padding tokens
-        attention_mask = input_ids != tokenizer.pad_token_id
-        input_ids = jnp.where(attention_mask, input_ids, 0)
-
-        # assign position ids
-        position_ids = attention_mask.cumsum(1) - attention_mask
-
-        model_out = model.module.apply(
-            variables=model.params,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids
-        )
-
-        # shape: [batch_size, length, 1]
-        return lm_backbone_out
 
 def prepare_policy_forward_and_policy_generate(args, tokenizer):
     """Prepare the forward pass of the policy model and parameters."""
@@ -396,115 +361,90 @@ def prepare_policy_forward_and_policy_generate(args, tokenizer):
     return policy_forward, policy_generate, policy_params
 
 @flax.struct.dataclass
-class DPOStatistics(metrics.Collection):
+class KTOStatistics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
 
 def train_step(
-    policy_state, # with respect to the current model
-    ref_model, # with respect to the reference model
-    dpo_stats,
-    mb_query_responses_pref,
-    mb_query_responses_rej,
+    policy_state,
+    ref_model,
+    kto_stats,
+    mb_query_responses,
+    mb_chosen_labels,
+    kl_z_ref,
     tokenizer,
     args
 ):
-    def dpo_loss(params):
-        """
-        Implementing preference loss based on https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py#L45
-        """
-
-        # From policy
-        output_pref_theta = policy_state.apply_fn(params, mb_query_responses_pref)
-        output_rej_theta = policy_state.apply_fn(params, mb_query_responses_rej)
-
-        logits_pref_theta =  output_pref_theta.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
-        logits_rej_theta =  output_rej_theta.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
-
+    def kto_loss(params):
+        responses = mb_query_responses[:, args.task.query_length :]
+        filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
+        
+        # Policy log probs
+        output_policy = policy_state.apply_fn(params, mb_query_responses)
+        logits_policy = output_policy.logits[:, args.task.query_length - 1 : -1, :]
+        logits_policy /= args.task.temperature
+        
+        policy_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits_policy, responses)
+        policy_logprobs=policy_logprobs*filter_for_pad_logprobs
+        
         # From reference model
-        output_pref_refm = model_policy_forward(ref_model, mb_query_responses_pref)
-        output_rej_refm = model_policy_forward(ref_model, mb_query_responses_rej)
+        output_refm = model_policy_forward(ref_model, mb_query_responses)
+        logits_refm = output_refm.logits[:, args.task.query_length - 1 : -1, :]
+        logits_refm /= args.task.temperature
         
-        logits_pref_refm =  output_pref_refm.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
-        logits_rej_refm =  output_rej_refm.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
-
-        # Processing responses
-        responses_pref = mb_query_responses_pref[:, args.task.query_length :] 
-        responses_rej = mb_query_responses_rej[:, args.task.query_length :] 
-
-        # Using the same variable names from the DPO implmentation linked above
-        policy_chosen_logps = -optax.softmax_cross_entropy_with_integer_labels(logits_pref_theta, responses_pref)
-        policy_rejected_logps = -optax.softmax_cross_entropy_with_integer_labels(logits_rej_theta, responses_rej)
-
-        reference_chosen_logps = -optax.softmax_cross_entropy_with_integer_labels(logits_pref_refm, responses_pref)
-        reference_rejected_logps = -optax.softmax_cross_entropy_with_integer_labels(logits_rej_refm, responses_rej)        
-
-        # Some filtering thing for padded tokens
-        filter_for_pad_logprobs_pref = (responses_pref!=tokenizer.pad_token_id) # TODO: Do I need both of these or should they be the same?
-        filter_for_pad_logprobs_rej = (responses_rej!=tokenizer.pad_token_id)
-
-        policy_chosen_logps = policy_chosen_logps*filter_for_pad_logprobs_pref
-        policy_rejected_logps = policy_rejected_logps*filter_for_pad_logprobs_rej
-
-        reference_chosen_logps = reference_chosen_logps*filter_for_pad_logprobs_pref
-        reference_rejected_logps = reference_rejected_logps*filter_for_pad_logprobs_rej
-
-        # Computing loss
-        pi_logratios = policy_chosen_logps - policy_rejected_logps
-        ref_logratios = reference_chosen_logps - reference_rejected_logps
-
-        temp = pi_logratios - ref_logratios
-
-        # dpo_loss = jnp.sum(temp)
-        # dpo_loss_val = (dpo_loss - 1/(2*args.dpo.beta)) **2
+        ref_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits_refm, responses)
+        ref_logprobs=ref_logprobs*filter_for_pad_logprobs
         
-        dpo_loss = -flax.linen.logsigmoid(beta*temp)
-        assert dpo_loss.n_dim==1
+        # Take diff and apply kto val function
+        temp_diff = policy_logprobs - ref_logprobs
         
-        dpo_loss_val = jnp.sum(dpo_loss)
-
-        # dpo_loss_val = jnp.sum(policy_chosen_logps) # this should boil down to SFT if you want to debug
+        kto_des = args.kto.lam_D*flax.linen.sigmoid(beta*(temp_diff-kl_z_ref))
+        kto_undes = args.kto.lam_U*flax.linen.sigmoid(beta*(kl_z_ref-temp_diff))
         
-        current_dpo_stats = dict(loss=dpo_loss_val)
+        kto_loss_val = kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels)
+        
+        print("loss val found")
+        
+        current_kto_stats = dict(loss=kto_loss_val)
 
-        return dpo_loss_val, current_dpo_stats
+        return kto_loss_val, current_kto_stats
 
-    grad_fn = jax.value_and_grad(dpo_loss, has_aux=True)
-    (dpo_loss, current_dpo_stats), grads = grad_fn(policy_state.params)
+    grad_fn = jax.value_and_grad(kto_loss, has_aux=True)
+    (loss, current_kto_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
     
-    dpo_stats = dpo_stats.merge(DPOStatistics.gather_from_model_output(**current_dpo_stats))
+    kto_stats = kto_stats.merge(KTOStatistics.gather_from_model_output(**current_kto_stats))
 
-    return policy_state, dpo_stats
+    return policy_state, kto_stats
 
 
 def linear_schedule(count, args):
     # anneal learning rate linearly
-    frac = 1.0 - (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_updates
-    return args.dpo.lr * frac
+    frac = 1.0 - (count // (args.kto.nminibatches * args.kto.noptepochs)) / args.kto.num_updates
+    return args.kto.lr * frac
 
 
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
-    args.dpo.world_size = jax.process_count()
+    args.kto.world_size = jax.process_count()
     learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
     global_learner_decices = [
         global_devices[d_id + process_index * len(local_devices)]
-        for process_index in range(args.dpo.world_size)
+        for process_index in range(args.kto.world_size)
         for d_id in args.learner_device_ids
     ]
     pprint({"global_learner_decices": global_learner_decices})
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.learner_devices = [str(item) for item in learner_devices]
     args.local_rank = jax.process_index()
-    args.dpo.batch_size = int(args.dpo.local_batch_size * len(args.learner_devices) * args.dpo.world_size)
-    args.dpo.minibatch_size = exact_div(args.dpo.batch_size, args.dpo.nminibatches)
-    args.dpo.local_mini_batch_size = exact_div(args.dpo.local_batch_size, args.dpo.nminibatches)
-    args.dpo.local_micro_batch_size = 1 # exact_div(args.dpo.local_mini_batch_size, args.dpo.gradient_accumulation_steps)
-    # `per_rank_rollout_batch_size` is our `args.dpo.local_batch_size`
-    # `per_rank_minibatch_size` is our `args.dpo.local_mini_batch_size`
-    args.dpo.num_updates = args.dpo.total_episodes // args.dpo.batch_size
+    args.kto.batch_size = int(args.kto.local_batch_size * len(args.learner_devices) * args.kto.world_size)
+    args.kto.minibatch_size = exact_div(args.kto.batch_size, args.kto.nminibatches)
+    args.kto.local_mini_batch_size = exact_div(args.kto.local_batch_size, args.kto.nminibatches)
+    args.kto.local_micro_batch_size = exact_div(args.kto.local_mini_batch_size, args.kto.gradient_accumulation_steps)
+    # `per_rank_rollout_batch_size` is our `args.kto.local_batch_size`
+    # `per_rank_minibatch_size` is our `args.kto.local_mini_batch_size`
+    args.kto.num_updates = args.kto.total_episodes // args.kto.batch_size
 
     console = Console(force_terminal=True)
     run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -539,14 +479,6 @@ def train(args: Args):
     # we use the padding token manually but do not resize the token embedding of the model
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     
-    print("tokenizer initialized")
-    
-    (
-        policy_forward,
-        policy_generate,
-        policy_params,
-    ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
-    
     ref_model = FlaxAutoModelForCausalLM.from_pretrained(args.base_model)
     # disable `pad_token_id` and `eos_token_id` because we just want to
     # generate tokens without truncation / padding
@@ -562,6 +494,15 @@ def train(args: Args):
         pad_token_id=tokenizer.pad_token_id,
     )
     
+    print("tokenizer initialized")
+    
+    (
+        policy_forward,
+        policy_generate,
+        policy_params,
+    ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
+    ref_policy_params = copy.deepcopy(policy_params)
+    
     print("policy param initialized")
 
     if args.use_tensorflow_adam:
@@ -572,9 +513,9 @@ def train(args: Args):
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(adam)(
             learning_rate=functools.partial(linear_schedule, args=args),
-            eps=args.dpo.eps,
+            eps=args.kto.eps,
         ),
-        every_k_schedule=args.dpo.gradient_accumulation_steps,
+        every_k_schedule=args.kto.gradient_accumulation_steps,
     )
     
     print("optimizer initialized")
@@ -584,8 +525,7 @@ def train(args: Args):
     
     print("Train state created")
 
-    # Changed to DPO
-    dataset = MyDPODataset(
+    dataset = MyKTODataset(
         DATASET[args.task.query_dataset],
         tokenizer,
         args.task.query_length,
@@ -598,79 +538,96 @@ def train(args: Args):
     
     dataloader = DataLoader(
         dataset,
-        batch_size=args.dpo.batch_size,
+        batch_size=args.kto.batch_size,
         collate_fn=numpy_collate,
     )
     iter_dataloader = iter(dataloader)
     
     print("Iterable dataloader initialized")
 
-    # Changed to have multiple responses
-    def train_update(policy_state, input_ids, response_pref_ids, response_rej_ids, dpo_stats):
+    def train_update(policy_state, input_ids, response_ids, chosen_labels, kto_stats):
         queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
 
-        query_responses_pref = jnp.concatenate((input_ids, response_pref_ids), axis=1)
-        query_responses_rej = jnp.concatenate((input_ids, response_rej_ids), axis=1)
+        query_responses = jnp.concatenate((input_ids, response_ids), axis=1)
+        
+        response_ids_reversed = response_ids[::-1, :]
+        
+        kl_query_responses = jnp.concatenate((input_ids, response_ids_reversed), axis=1)
+        filter_for_pad_logprobs_kl = (response_ids_reversed!=tokenizer.pad_token_id)
+        
+        # Policy log probs
+        output_policy_kl = jax.lax.stop_gradient(policy_state.apply_fn(params, kl_query_responses))
+        logits_policy_kl = output_policy_kl.logits[:, args.task.query_length - 1 : -1, :]
+        logits_policy_kl /= args.task.temperature
+        
+        policy_logprobs_kl = -optax.softmax_cross_entropy_with_integer_labels(logits_policy_kl, response_ids_reversed)
+        policy_logprobs_kl=policy_logprobs_kl*filter_for_pad_logprobs_kl
+        
+        # From reference model
+        output_refm_kl = model_policy_forward(ref_model, mb_query_responses)
+        logits_refm_kl = output_refm_kl.logits[:, args.task.query_length - 1 : -1, :]
+        logits_refm_kl /= args.task.temperature
+        
+        ref_logprobs_kl = -optax.softmax_cross_entropy_with_integer_labels(logits_refm_kl, response_ids_reversed)
+        ref_logprobs_kl=ref_logprobs_kl*filter_for_pad_logprobs_kl
+        
+        # Take diff and apply kto val function
+        kl_z_ref = policy_logprobs_kl - ref_logprobs_kl
+        assert kl_z_ref.ndim==1
+        kl_z_ref = jnp.mean(kl_z_ref)
+        kl_z_ref = jnp.max([0,kl_z_ref])
+       
+        def kto_single_microbatch(carry, inp):
+            policy_state, kto_stats = carry
+            mb_query_responses, kl_z_ref = inp
 
-        def dpo_single_microbatch(carry, inp):
-            policy_state, dpo_stats = carry
-            mb_query_responses_pref, mb_query_responses_rej = inp
-
-            policy_state, dpo_stats = train_step(
+            policy_state, kto_stats = train_step(
                 policy_state=policy_state,
-                ref_model=ref_model, # added for reference policy
-                dpo_stats=dpo_stats,
-                mb_query_responses_pref=mb_query_responses_pref,
-                mb_query_responses_rej=mb_query_responses_rej,
+                ref_model = ref_model,
+                kto_stats=kto_stats,
+                mb_query_responses=mb_query_responses,
+                kl_z_ref = kl_z_ref,
                 tokenizer=tokenizer,
                 args=args
             )
-            return (policy_state, dpo_stats), None
+            return (policy_state, kto_stats), None
 
-        def dpo_single_epoch(carry, inp):
-            policy_state, dpo_stats, key = carry
+        def kto_single_epoch(carry, inp):
+            policy_state, kto_stats, key = carry
             key, subkey = jax.random.split(key, 2)
-            perm = jax.random.permutation(key, args.dpo.local_batch_size)
+            perm = jax.random.permutation(key, args.kto.local_batch_size)
             # That is -> query_responses, logprobs = inp
             
-            # For both rejected and preferred query responses
-            mbs_query_responses_pref = einops.rearrange(
-                query_responses_pref[perm],
+            mbs_query_responses = einops.rearrange(
+                query_responses[perm],
                 "(c m) l -> c m l",
-                c=args.dpo.gradient_accumulation_steps,
+                c=args.kto.gradient_accumulation_steps,
             )
-
-            mbs_query_responses_rej = einops.rearrange(
-                query_responses_rej[perm],
-                "(c m) l -> c m l",
-                c=args.dpo.gradient_accumulation_steps,
-            )
-
-            (policy_state, dpo_stats), _ = jax.lax.scan(
-                f=dpo_single_microbatch,
-                init=(policy_state, dpo_stats),
+            
+            (policy_state, kto_stats), _ = jax.lax.scan(
+                f=kto_single_microbatch,
+                init=(policy_state, kto_stats),
                 xs=(
-                    mbs_query_responses_pref,
-                    mbs_query_responses_rej,
+                    mbs_query_responses, kl_z_ref
                 ),
             )
-            return (policy_state, dpo_stats, key), None
+            return (policy_state, kto_stats, key), None
 
         key = jax.random.PRNGKey(args.seed)
-        # Do multiple epochs of DPO training, with a fresh random shuffle in each epoch
-        (policy_state, dpo_stats, _), _ = jax.lax.scan(
-            f=dpo_single_epoch,
-            init=(policy_state, dpo_stats, key),
+        # Do multiple epochs of sft training, with a fresh random shuffle in each epoch
+        (policy_state, kto_stats, _), _ = jax.lax.scan(
+            f=kto_single_epoch,
+            init=(policy_state, kto_stats, key),
             xs=None,
-            length=args.dpo.noptepochs,
+            length=args.kto.noptepochs,
         )
 
-        dpo_stats = jax.lax.pmean(dpo_stats.compute(), "batch")
+        kto_stats = jax.lax.pmean(kto_stats.compute(), "batch")
 
         samples_to_print = dict(
-            query_response_pref=query_responses_pref[0] # Printing preferred responses
+            query_response=query_responses[0]
         )
-        return policy_state, dpo_stats, samples_to_print
+        return policy_state, kto_stats, samples_to_print
 
     p_train_update = jax.pmap(
         train_update,
@@ -685,26 +642,20 @@ def train(args: Args):
     
     print("starting train loop")
 
-    # Changed this to have both responses
-    for update, [input_ids, response_pref_ids, response_rej_ids] in enumerate(iter_dataloader):
-        global_step += args.dpo.batch_size
+    for update, [input_ids, response_ids] in enumerate(iter_dataloader):
+        global_step += args.kto.batch_size
         input_ids = common_utils.shard(input_ids)
-
-        # For both responses
-        response_pref_ids = common_utils.shard(response_pref_ids)
-        response_rej_ids = common_utils.shard(response_rej_ids)
-
-        dpo_stats = jax_utils.replicate(DPOStatistics.empty())
-        policy_state, dpo_stats, samples_to_print = p_train_update(
+        response_ids = common_utils.shard(response_ids)
+        kto_stats = jax_utils.replicate(KTOStatistics.empty())
+        policy_state, kto_stats, samples_to_print = p_train_update(
             policy_state=policy_state,
             input_ids=input_ids,
-            response_pref_ids = response_pref_ids,
-            response_rej_ids = response_rej_ids,
-            dpo_stats=dpo_stats
+            response_ids = response_ids,
+            kto_stats=kto_stats
         )
 
         try:
-            sample_query_response = samples_to_print["query_response_pref"][0]
+            sample_query_response = samples_to_print["query_response"][0]
             console.print(
                 f"[green][bold]{'Query'}:[/]\n"
                 + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
@@ -715,12 +666,12 @@ def train(args: Args):
 
         
         # RL metrics aggregated at the batch level
-        dpo_stats = common_utils.get_metrics([dpo_stats])
-        writer.add_scalar("dpo/loss/total", dpo_stats["loss"].item(), update)
+        kto_stats = common_utils.get_metrics([kto_stats])
+        writer.add_scalar("kto/loss/total", kto_stats["loss"].item(), update)
 
         # Logging learning rate and learning progress
-        writer.add_scalar("dpo/lr", policy_state.opt_state.inner_opt_state.hyperparams["learning_rate"][0].item(), update)
-        writer.add_scalar("dpo/episode", global_step, update)
+        writer.add_scalar("kto/lr", policy_state.opt_state.inner_opt_state.hyperparams["learning_rate"][0].item(), update)
+        writer.add_scalar("kto/episode", global_step, update)
 
     print("finished training")
     
