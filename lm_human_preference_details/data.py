@@ -36,7 +36,7 @@ def tldr_kto_random_generator(split="train", seed=0, shuffle=False):
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 
-                       split=f'{split}[:10]',
+                       split=f'{split}[:2000]',
                        streaming=False,
     ).select_columns(['info', 'summaries', 'choice'])
     
@@ -70,7 +70,7 @@ def tldr_dpo_generator(split="train", seed=0, shuffle=False):
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 
-                       split=f'{split}[:10]',
+                       split=f'{split}[:1000]',
                        streaming=False,
     ).select_columns(['info', 'summaries', 'choice'])
     

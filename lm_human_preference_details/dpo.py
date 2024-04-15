@@ -5,6 +5,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+from tqdm import tqdm
+from math import min
 
 import einops
 import flax
@@ -33,7 +35,7 @@ from data import DATASET
 @dataclass
 class DPOParams:
     # Batch Size stuff
-    local_batch_size: int = 8
+    local_batch_size: int = 4
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
@@ -48,9 +50,14 @@ class DPOParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    total_episodes: int = 1000000
-    noptepochs: int = 4
-    lr: float = 0.00001
+    opt_choice = optax.rmsprop
+    use_tensorflow_adam: bool = False
+    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
+    
+    total_episodes: int = 93500
+    num_warmup: int = 100
+    noptepochs: int = 1
+    lr: float = 1e-6
     eps: float = 1e-5
 
     # DPO params
@@ -112,9 +119,6 @@ class Args:
     
     save_path: str = "dpo_models/"
     """Where to save the model"""
-    
-    use_tensorflow_adam: bool = True
-    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
     
     task: TaskParams = field(default_factory=TaskParams)
     dpo: DPOParams = field(default_factory=DPOParams)
@@ -483,6 +487,9 @@ def linear_schedule(count, args):
     frac = 1.0 - (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_updates
     return args.dpo.lr * frac
 
+def linear_warmup_schedule(count, args):
+    frac = min(1,(count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_warmup)
+    return args.dpo.lr * frac
 
 def train(args: Args):
     local_devices = jax.local_devices()
@@ -564,10 +571,8 @@ def train(args: Args):
     
     print("policy param initialized")
 
-    if args.use_tensorflow_adam:
-        adam = adam_tf_style
-    else:
-        adam = optax.adam
+    if args.kto.use_tensorflow_adam:
+        args.kto.opt_choice = adam_tf_style
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(adam)(
@@ -686,7 +691,7 @@ def train(args: Args):
     print("starting train loop")
 
     # Changed this to have both responses
-    for update, [input_ids, response_pref_ids, response_rej_ids] in enumerate(iter_dataloader):
+    for update, [input_ids, response_pref_ids, response_rej_ids] in tqdm(enumerate(iter_dataloader)):
         global_step += args.dpo.batch_size
         input_ids = common_utils.shard(input_ids)
 
@@ -702,6 +707,16 @@ def train(args: Args):
             response_rej_ids = response_rej_ids,
             dpo_stats=dpo_stats
         )
+        
+        if (args.local_rank == 0) and (update%1000==0):
+            if args.save_path:
+                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+
+            if args.local_rank == 0 and args.track:
+                wandb.finish()
 
         try:
             sample_query_response = samples_to_print["query_response_pref"][0]
@@ -726,15 +741,15 @@ def train(args: Args):
     
     policy_state = jax_utils.unreplicate(policy_state)
     # save model
-    if args.local_rank == 0:
-        if args.save_path:
-            ckpt = {"policy_model": policy_state, "args": vars(args)}
-            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
+#     if args.local_rank == 0:
+#         if args.save_path:
+#             ckpt = {"policy_model": policy_state, "args": vars(args)}
+#             orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#             save_args = orbax_utils.save_args_from_target(ckpt)
+#             orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
 
-        if args.local_rank == 0 and args.track:
-            wandb.finish()
+#         if args.local_rank == 0 and args.track:
+#             wandb.finish()
 
 
 if __name__ == "__main__":

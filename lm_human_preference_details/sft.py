@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+from tqdm import tqdm
 
 import einops
 import flax
@@ -559,7 +560,7 @@ def train(args: Args):
     
     global_step = 0
     
-    for update, [input_ids, response_ids] in enumerate(iter_dataloader):
+    for update, [input_ids, response_ids] in tqdm(enumerate(iter_dataloader)):
         global_step += args.sft.batch_size
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
@@ -574,7 +575,7 @@ def train(args: Args):
         # save model
         if (args.local_rank == 0) and (update%1000==0):
             if args.save_path:
-                ckpt = {"policy_model": policy_state, "args": vars(args)}
+                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
                 save_args = orbax_utils.save_args_from_target(ckpt)
                 orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
@@ -582,15 +583,15 @@ def train(args: Args):
             if args.local_rank == 0 and args.track:
                 wandb.finish()
 
-        # try:
-        #   sample_query_response = samples_to_print["query_response"][0]
-        #     console.print(
-        #         f"[green][bold]{'Query'}:[/]\n"
-        #         + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-        #         + f"[yellow][bold]{'Response'}:[/]\n"
-        #         )
-        # except Exception as e:
-        #     print(e)
+        try:
+          sample_query_response = samples_to_print["query_response"][0]
+            console.print(
+                f"[green][bold]{'Query'}:[/]\n"
+                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+                + f"[yellow][bold]{'Response'}:[/]\n"
+                )
+        except Exception as e:
+            print(e)
 
         
         # RL metrics aggregated at the batch level

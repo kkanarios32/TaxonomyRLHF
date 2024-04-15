@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+from tqdm import tqdm
 
 import einops
 import flax
@@ -49,8 +50,8 @@ class KTOParams:
     
     # Learning rate, epochs, episodes
     total_episodes: int = 1000000
-    noptepochs: int = 4
-    lr: float = 0.00001
+    noptepochs: int = 1
+    lr: float = 1e-6
     eps: float = 1e-5
     
     # Params for KTO
@@ -426,9 +427,7 @@ def train_step(
         assert kto_des.ndim==1
         
         kto_loss_val = jnp.sum(kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels))
-        
-        print("loss val found")
-        
+
         current_kto_stats = dict(loss=kto_loss_val)
 
         return kto_loss_val, current_kto_stats
@@ -437,8 +436,6 @@ def train_step(
     (loss, current_kto_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
-    
-    print("gradient taken")
     
     kto_stats = kto_stats.merge(KTOStatistics.gather_from_model_output(**current_kto_stats))
 
@@ -676,7 +673,7 @@ def train(args: Args):
     
     print("starting train loop")
 
-    for update, [input_ids, response_ids, chosen_labels] in enumerate(iter_dataloader):
+    for update, [input_ids, response_ids, chosen_labels] in tqdm(enumerate(iter_dataloader)):
         global_step += args.kto.batch_size
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
@@ -689,6 +686,17 @@ def train(args: Args):
             chosen_labels=chosen_labels,
             kto_stats=kto_stats
         )
+        
+        # save model
+        if (args.local_rank == 0) and (update%1000==0):
+            if args.save_path:
+                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+
+            if args.local_rank == 0 and args.track:
+                wandb.finish()
 
         try:
             sample_query_response = samples_to_print["query_response"][0]
@@ -712,7 +720,7 @@ def train(args: Args):
     print("finished training")
     
     policy_state = jax_utils.unreplicate(policy_state)
-    # save model
+    save model
     if args.local_rank == 0:
         if args.save_path:
             ckpt = {"policy_model": policy_state, "args": vars(args)}
