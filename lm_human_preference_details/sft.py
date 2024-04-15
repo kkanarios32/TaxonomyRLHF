@@ -211,7 +211,7 @@ class MySFTDataset(IterableDataset):
         self.end_token = token_to_index[end_text] if self.end_text else None
 
     def __iter__(self):
-        for query, response in self.generator("train", self.seed, shuffle=True):
+        for query, response in self.generator("train", self.seed, shuffle=False):
             query_tokens = self.tokenizer.encode(query)
 
             if self.start_token is not None:
@@ -570,6 +570,17 @@ def train(args: Args):
             response_ids = response_ids,
             sft_stats=sft_stats
         )
+        
+        # save model
+        if (args.local_rank == 0) and (update%1000==0):
+            if args.save_path:
+                ckpt = {"policy_model": policy_state, "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+
+            if args.local_rank == 0 and args.track:
+                wandb.finish()
 
         # try:
         #   sample_query_response = samples_to_print["query_response"][0]

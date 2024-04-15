@@ -17,7 +17,7 @@ def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
         random.seed(seed)
         random.shuffle(datas)
 
-    for data in datas[:100]:
+    for data in datas:
         data = json.loads(data)
         subreddit = "SUBREDDIT: r/" + data['subreddit']
         title = "\n\nTITLE: " + data['title']
