@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
 from tqdm import tqdm
-from math import min
 
 import einops
 import flax
@@ -35,11 +34,11 @@ from data import DATASET
 @dataclass
 class DPOParams:
     # Batch Size stuff
-    local_batch_size: int = 4
+    local_batch_size: int = 64
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 16
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -55,13 +54,13 @@ class DPOParams:
     """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
     
     total_episodes: int = 93500
-    num_warmup: int = 100
+    num_warmup: int = 20
     noptepochs: int = 1
-    lr: float = 1e-6
+    lr: float = 5e-6
     eps: float = 1e-5
 
     # DPO params
-    beta: float = 0.5 # as suggested in the DPO paper
+    beta: float = 0.7 # as suggested in the DPO paper
    
 
 @dataclass
@@ -488,8 +487,8 @@ def linear_schedule(count, args):
     return args.dpo.lr * frac
 
 def linear_warmup_schedule(count, args):
-    frac = min(1,(count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_warmup)
-    return args.dpo.lr * frac
+    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_warmup]))
+    return 1e-7*(1-frac) + args.dpo.lr * frac
 
 def train(args: Args):
     local_devices = jax.local_devices()
@@ -571,12 +570,17 @@ def train(args: Args):
     
     print("policy param initialized")
 
-    if args.kto.use_tensorflow_adam:
-        args.kto.opt_choice = adam_tf_style
+    if (args.dpo.opt_choice=="adam_tf"):
+        optim_choice = adam_tf_style
+    elif (args.dpo.opt_choice=="rmsprop"):
+        optim_choice = optax.rmsprop
+    else:
+        optim_choice = optax.adam
+    
 
     optimizer = optax.MultiSteps(
-        optax.inject_hyperparams(adam)(
-            learning_rate=functools.partial(linear_schedule, args=args),
+        optax.inject_hyperparams(optim_choice)(
+            learning_rate = functools.partial(linear_warmup_schedule, args=args), 
             eps=args.dpo.eps,
         ),
         every_k_schedule=args.dpo.gradient_accumulation_steps,
@@ -708,25 +712,25 @@ def train(args: Args):
             dpo_stats=dpo_stats
         )
         
-        if (args.local_rank == 0) and (update%1000==0):
-            if args.save_path:
-                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+#         if (args.local_rank == 0) and (update>0) and (update%1000==0):
+#             if args.save_path:
+#                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+#                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#                 save_args = orbax_utils.save_args_from_target(ckpt)
+#                 orbax_checkpointer.save(args.save_path+"model_"+str(update)+"/", ckpt, save_args=save_args, force=True)
 
-            if args.local_rank == 0 and args.track:
-                wandb.finish()
+#             if args.local_rank == 0 and args.track:
+#                 wandb.finish()
 
-        try:
-            sample_query_response = samples_to_print["query_response_pref"][0]
-            console.print(
-                f"[green][bold]{'Query'}:[/]\n"
-                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-                + f"[yellow][bold]{'Response'}:[/]\n"
-                )
-        except Exception as e:
-            print(e)
+#         try:
+#             sample_query_response = samples_to_print["query_response_pref"][0]
+#             console.print(
+#                 f"[green][bold]{'Query'}:[/]\n"
+#                 + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+#                 + f"[yellow][bold]{'Response'}:[/]\n"
+#                 )
+#         except Exception as e:
+#             print(e)
 
         
         # RL metrics aggregated at the batch level
