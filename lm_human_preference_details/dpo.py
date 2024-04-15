@@ -34,11 +34,11 @@ from data import DATASET
 @dataclass
 class DPOParams:
     # Batch Size stuff
-    local_batch_size: int = 64
+    local_batch_size: int = 16
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 16
+    gradient_accumulation_steps: int = 4
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""

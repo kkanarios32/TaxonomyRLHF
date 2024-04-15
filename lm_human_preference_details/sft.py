@@ -399,6 +399,10 @@ def linear_schedule(count, args):
     frac = 1.0 - (count // (args.sft.nminibatches * args.sft.noptepochs)) / args.sft.num_updates
     return args.sft.lr * frac
 
+def constant_schedule(count, args):
+    # anneal learning rate linearly
+    return args.sft.lr
+
 
 def train(args: Args):
     local_devices = jax.local_devices()
@@ -469,7 +473,7 @@ def train(args: Args):
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(adam)(
-            learning_rate=functools.partial(linear_schedule, args=args),
+            learning_rate=functools.partial(constant_schedule, args=args),
             eps=args.sft.eps,
         ),
         every_k_schedule=args.sft.gradient_accumulation_steps,
@@ -583,15 +587,15 @@ def train(args: Args):
             if args.local_rank == 0 and args.track:
                 wandb.finish()
 
-        try:
-          sample_query_response = samples_to_print["query_response"][0]
-            console.print(
-                f"[green][bold]{'Query'}:[/]\n"
-                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-                + f"[yellow][bold]{'Response'}:[/]\n"
-                )
-        except Exception as e:
-            print(e)
+        # try:
+        #   sample_query_response = samples_to_print["query_response"][0]
+        #     console.print(
+        #         f"[green][bold]{'Query'}:[/]\n"
+        #         + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+        #         + f"[yellow][bold]{'Response'}:[/]\n"
+        #         )
+        # except Exception as e:
+        #     print(e)
 
         
         # RL metrics aggregated at the batch level
