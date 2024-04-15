@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, FlaxAutoModelForCausalLM, GenerationConfig
 
-from lm_human_preference_details.data import DATASET
+from data import DATASET
 
 @dataclass
 class SFTParams:

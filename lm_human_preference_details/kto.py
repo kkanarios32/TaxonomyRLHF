@@ -5,7 +5,6 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
-from tqdm import tqdm
 
 import einops
 import flax
@@ -29,7 +28,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, FlaxAutoModelForCausalLM, GenerationConfig
 
-from lm_human_preference_details.data import DATASET
+from data import DATASET
 
 @dataclass
 class KTOParams:
@@ -253,7 +252,7 @@ class MyKTODataset(IterableDataset):
                                                  return_attention_mask=False
                                                 )
 
-            yield query_output["input_ids"], np.squeeze(response_output["input_ids"]), chosen_label
+            yield query_output["input_ids"], np.squeeze(response_output["input_ids"]), np.array([chosen_label])
 
 
 
@@ -419,12 +418,14 @@ def train_step(
         ref_logprobs=ref_logprobs*filter_for_pad_logprobs
         
         # Take diff and apply kto val function
-        temp_diff = policy_logprobs - ref_logprobs
+        temp_diff = jnp.sum(policy_logprobs - ref_logprobs, axis=1)
         
-        kto_des = args.kto.lam_D*flax.linen.sigmoid(beta*(temp_diff-kl_z_ref))
-        kto_undes = args.kto.lam_U*flax.linen.sigmoid(beta*(kl_z_ref-temp_diff))
+        kto_des = args.kto.lam_D*flax.linen.sigmoid(args.kto.beta*(temp_diff-kl_z_ref))
+        kto_undes = args.kto.lam_U*flax.linen.sigmoid(args.kto.beta*(kl_z_ref-temp_diff))
         
-        kto_loss_val = kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels)
+        assert kto_des.ndim==1
+        
+        kto_loss_val = jnp.sum(kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels))
         
         print("loss val found")
         
@@ -436,6 +437,8 @@ def train_step(
     (loss, current_kto_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
+    
+    print("gradient taken")
     
     kto_stats = kto_stats.merge(KTOStatistics.gather_from_model_output(**current_kto_stats))
 
@@ -629,7 +632,7 @@ def train(args: Args):
             )
             mbs_chosen_labels = einops.rearrange(
                 chosen_labels[perm],
-                "(c m) -> c m",
+                "(c m) l -> c m l",
                 c=args.kto.gradient_accumulation_steps,
             )
             
@@ -637,7 +640,9 @@ def train(args: Args):
                 f=kto_single_microbatch,
                 init=(policy_state, kto_stats),
                 xs=(
-                    mbs_query_responses, mbs_chosen_labels, kl_z_ref
+                    mbs_query_responses, 
+                    mbs_chosen_labels, 
+                    kl_z_ref*jnp.ones(args.kto.gradient_accumulation_steps),
                 ),
             )
             return (policy_state, kto_stats, key), None
