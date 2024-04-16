@@ -591,7 +591,7 @@ def train(args: Args):
             sft_stats=sft_stats
         )
         
-        save model
+        # save model
         if (args.local_rank == 0) and (update%3000==0):
             if args.save_path:
                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
