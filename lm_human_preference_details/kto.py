@@ -49,11 +49,18 @@ class KTOParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
+    opt_choice = optax.rmsprop
+    use_tensorflow_adam: bool = False
+    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
+
     total_episodes: int = 1000000
+    num_warmup: int = 20
     noptepochs: int = 1
     lr: float = 1e-6
     eps: float = 1e-5
     
+
+
     # Params for KTO
     lam_D = 1.2
     lam_U = 1
@@ -448,6 +455,11 @@ def linear_schedule(count, args):
     return args.kto.lr * frac
 
 
+def linear_warmup_schedule(count, args):
+    frac = jnp.min(jnp.array([1.0, (count // (args.kto.nminibatches * args.kto.noptepochs)) / args.kto.num_warmup]))
+    return 1e-7*(1-frac) + args.kto.lr * frac
+
+
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
@@ -529,18 +541,27 @@ def train(args: Args):
     
     print("policy param initialized")
 
-    if args.use_tensorflow_adam:
-        adam = adam_tf_style
+    # if args.use_tensorflow_adam:
+    #     adam = adam_tf_style
+    # else:
+    #     adam = optax.adam
+
+    if args.kto.opt_choice == "adam_tf":
+        optim_choice = adam_tf_style
+    elif args.kto.opt_choice == "rmsprop":
+        optim_choice = optax.rmsprop
     else:
-        adam = optax.adam
+        optim_choice = optax.adam
+
 
     optimizer = optax.MultiSteps(
-        optax.inject_hyperparams(adam)(
-            learning_rate=functools.partial(linear_schedule, args=args),
+        optax.inject_hyperparams(optim_choice)(
+            learning_rate=functools.partial(linear_warmup_schedule, args=args),
             eps=args.kto.eps,
         ),
         every_k_schedule=args.kto.gradient_accumulation_steps,
     )
+
     
     print("optimizer initialized")
 
@@ -688,25 +709,26 @@ def train(args: Args):
         )
         
         # save model
-        if (args.local_rank == 0) and (update%1000==0):
-            if args.save_path:
-                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+        # if (args.local_rank == 0) and (update%1000==0):
+        #     if args.save_path:
+        #        ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+        #        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        #        save_args = orbax_utils.save_args_from_target(ckpt)
+        #        orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
 
-            if args.local_rank == 0 and args.track:
-                wandb.finish()
+        
+        #    if args.local_rank == 0 and args.track:
+        #        wandb.finish()
 
-        try:
-            sample_query_response = samples_to_print["query_response"][0]
-            console.print(
-                f"[green][bold]{'Query'}:[/]\n"
-                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-                + f"[yellow][bold]{'Response'}:[/]\n"
-                )
-        except Exception as e:
-            print(e)
+        # try:
+        #     sample_query_response = samples_to_print["query_response"][0]
+        #     console.print(
+        #         f"[green][bold]{'Query'}:[/]\n"
+        #         + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+        #         + f"[yellow][bold]{'Response'}:[/]\n"
+        #         )
+        # except Exception as e:
+        #     print(e)
 
         
         # RL metrics aggregated at the batch level
@@ -720,7 +742,7 @@ def train(args: Args):
     print("finished training")
     
     policy_state = jax_utils.unreplicate(policy_state)
-    save model
+
     if args.local_rank == 0:
         if args.save_path:
             ckpt = {"policy_model": policy_state, "args": vars(args)}

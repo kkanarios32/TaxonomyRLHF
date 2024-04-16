@@ -53,6 +53,12 @@ class SFTParams:
     noptepochs: int = 1
     lr: float = 0.00001
     eps: float = 1e-5
+    num_warmup: int = 20
+
+    opt_choice = optax.rmsprop # adding in RMSProp
+    use_tensorflow_adam: bool = False
+
+    
 
 
 @dataclass
@@ -399,9 +405,15 @@ def linear_schedule(count, args):
     frac = 1.0 - (count // (args.sft.nminibatches * args.sft.noptepochs)) / args.sft.num_updates
     return args.sft.lr * frac
 
+
 def constant_schedule(count, args):
     # anneal learning rate linearly
     return args.sft.lr
+
+
+def linear_warmup_schedule(count, args):
+    frac = jnp.min(jnp.array([1.0, (count // (args.sft.nminibatches * args.sft.noptepochs)) / args.sft.num_warmup]))
+    return 1e-7*(1-frac) + args.sft.lr * frac
 
 
 def train(args: Args):
@@ -466,14 +478,22 @@ def train(args: Args):
     ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
     ref_policy_params = copy.deepcopy(policy_params)
     
-    if args.use_tensorflow_adam:
-        adam = adam_tf_style
+    # if args.use_tensorflow_adam:
+    #     adam = adam_tf_style
+    # else:
+    #     adam = optax.adam
+
+    if args.sft.opt_choice == "adam_tf":
+        optim_choice = adam_tf_style
+    elif args.sft.opt_choice == "rmsprop":
+        optim_choice = optax.rmsprop
     else:
-        adam = optax.adam
+        optim_choice = optax.adam
+
 
     optimizer = optax.MultiSteps(
-        optax.inject_hyperparams(adam)(
-            learning_rate=functools.partial(constant_schedule, args=args),
+        optax.inject_hyperparams(optim_choice)(
+            learning_rate=functools.partial(linear_warmup_schedule, args=args),
             eps=args.sft.eps,
         ),
         every_k_schedule=args.sft.gradient_accumulation_steps,
@@ -577,15 +597,15 @@ def train(args: Args):
         )
         
         # save model
-        if (args.local_rank == 0) and (update%1000==0):
-            if args.save_path:
-                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+        # if (args.local_rank == 0) and (update%1000==0):
+        #     if args.save_path:
+        #         ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+        #         orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        #         save_args = orbax_utils.save_args_from_target(ckpt)
+        #         orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
 
-            if args.local_rank == 0 and args.track:
-                wandb.finish()
+        #     if args.local_rank == 0 and args.track:
+        #         wandb.finish()
 
         # try:
         #   sample_query_response = samples_to_print["query_response"][0]
