@@ -1,4 +1,3 @@
-import copy
 import functools
 import os
 import time
@@ -459,7 +458,6 @@ def train_step(
         temp = jnp.sum(temp, axis=1)
         assert temp.ndim == 1
         # dpo_loss = jnp.sum(temp)
-        # dpo_loss_val = (dpo_loss - 1/(2*args.dpo.beta)) **2
         
         dpo_loss = -flax.linen.log_sigmoid(args.dpo.beta*temp)
         

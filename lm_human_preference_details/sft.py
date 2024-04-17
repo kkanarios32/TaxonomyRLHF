@@ -49,15 +49,13 @@ class SFTParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    total_episodes: int = 1000000
+    total_episodes: int = 118000
     noptepochs: int = 1
-    lr: float = 0.00001
-    eps: float = 1e-5
-    num_warmup: int = 20
+    lr: float = 5e-5
+    eps: float = 1e-6
+    percent_warmup: int = 0.1
 
-    opt_choice = optax.rmsprop # adding in RMSProp
-    use_tensorflow_adam: bool = False
-
+    opt_choice = "adamw" # using adamw
     
 
 
@@ -115,9 +113,6 @@ class Args:
     
     save_path: str = "sftmodels/"
     """Where to save the model"""
-    
-    use_tensorflow_adam: bool = True
-    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
     
     task: TaskParams = field(default_factory=TaskParams)
     sft: SFTParams = field(default_factory=SFTParams)
@@ -384,7 +379,7 @@ def train_step(
         filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
         response_logprobs=response_logprobs*filter_for_pad_logprobs
         
-        sft_loss_val = jnp.sum(response_logprobs)
+        sft_loss_val = -jnp.sum(response_logprobs)
                 
         current_sft_stats = dict(loss=sft_loss_val)
 
@@ -410,10 +405,13 @@ def constant_schedule(count, args):
     # anneal learning rate linearly
     return args.sft.lr
 
+def cosine_schedule(count, args):
+    return optax.cosine_decay_schedule(init_value=args.sft.lr, decay_steps = args.sft.num_updates, alpha=1e-7)(count)
+
 
 def linear_warmup_schedule(count, args):
-    frac = jnp.min(jnp.array([1.0, (count // (args.sft.nminibatches * args.sft.noptepochs)) / args.sft.num_warmup]))
-    return 1e-7*(1-frac) + args.sft.lr * frac
+    frac = jnp.min(jnp.array([1.0, (count // (args.sft.nminibatches * args.sft.noptepochs)) / (args.sft.percent_warmup*args.sft.num_updates)]))
+    return args.sft.lr * frac
 
 
 def train(args: Args):
@@ -477,23 +475,20 @@ def train(args: Args):
         policy_params,
     ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
     ref_policy_params = copy.deepcopy(policy_params)
-    
-    # if args.use_tensorflow_adam:
-    #     adam = adam_tf_style
-    # else:
-    #     adam = optax.adam
 
     if args.sft.opt_choice == "adam_tf":
         optim_choice = adam_tf_style
     elif args.sft.opt_choice == "rmsprop":
         optim_choice = optax.rmsprop
+    elif args.sft.opt_choice == "adamw":
+        optim_choice = optax.adamw
     else:
         optim_choice = optax.adam
 
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(optim_choice)(
-            learning_rate=functools.partial(linear_warmup_schedule, args=args),
+            learning_rate=functools.partial(cosine_schedule, args=args),
             eps=args.sft.eps,
         ),
         every_k_schedule=args.sft.gradient_accumulation_steps,
@@ -630,15 +625,15 @@ def train(args: Args):
     policy_state = jax_utils.unreplicate(policy_state)
 
     # save model
-    if args.local_rank == 0:
-        if args.save_path:
-            ckpt = {"policy_model": policy_state, "args": vars(args)}
-            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
+#     if args.local_rank == 0:
+#         if args.save_path:
+#             ckpt = {"policy_model": policy_state, "args": vars(args)}
+#             orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#             save_args = orbax_utils.save_args_from_target(ckpt)
+#             orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
 
-        if args.local_rank == 0 and args.track:
-            wandb.finish()
+#         if args.local_rank == 0 and args.track:
+#             wandb.finish()
 
 
 if __name__ == "__main__":

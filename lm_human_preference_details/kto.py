@@ -56,7 +56,7 @@ class KTOParams:
     total_episodes: int = 1000000
     num_warmup: int = 20
     noptepochs: int = 1
-    lr: float = 1e-6
+    lr: float = 5e-6
     eps: float = 1e-5
     
 
@@ -457,7 +457,7 @@ def linear_schedule(count, args):
 
 def linear_warmup_schedule(count, args):
     frac = jnp.min(jnp.array([1.0, (count // (args.kto.nminibatches * args.kto.noptepochs)) / args.kto.num_warmup]))
-    return 1e-7*(1-frac) + args.kto.lr * frac
+    return args.kto.lr * frac
 
 
 def train(args: Args):
@@ -743,15 +743,15 @@ def train(args: Args):
     
     policy_state = jax_utils.unreplicate(policy_state)
 
-    if args.local_rank == 0:
-        if args.save_path:
-            ckpt = {"policy_model": policy_state, "args": vars(args)}
-            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
+#     if args.local_rank == 0:
+#         if args.save_path:
+#             ckpt = {"policy_model": policy_state, "args": vars(args)}
+#             orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#             save_args = orbax_utils.save_args_from_target(ckpt)
+#             orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
 
-        if args.local_rank == 0 and args.track:
-            wandb.finish()
+#         if args.local_rank == 0 and args.track:
+#             wandb.finish()
 
 
 if __name__ == "__main__":
