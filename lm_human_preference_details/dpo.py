@@ -65,7 +65,7 @@ class DPOParams:
 @dataclass
 class TaskParams:
     # Query params
-    query_length: int = 471 # Changed for DPO
+    query_length: int = 600 # Changed for DPO
     query_dataset: str = "tldr-dpo" # Changed for DPO
     query_prefix: str = ""
     query_suffix: str = ""
@@ -73,7 +73,7 @@ class TaskParams:
     end_text: Optional[str] = None
 
     # Response params
-    response_length: int = 81 # Changed for DPO
+    response_length: int = 424 # Changed for DPO
 
     # Truncate response after the first occurrence of this token at or after index after when sampling.
     truncate_token: int = 13

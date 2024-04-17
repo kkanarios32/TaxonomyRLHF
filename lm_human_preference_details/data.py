@@ -10,7 +10,7 @@ from utils import blobs
 def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
     assert split in ["test", "train", "valid"]
 
-    with open("train.jsonl") as f:
+    with open("/home/ckausik/TaxonomyRLHF/lm_human_preference_details/train.jsonl") as f:
         datas = list(f)
     
     if shuffle:

@@ -591,16 +591,16 @@ def train(args: Args):
             sft_stats=sft_stats
         )
         
-        # save model
-        # if (args.local_rank == 0) and (update%1000==0):
-        #     if args.save_path:
-        #         ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
-        #         orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        #         save_args = orbax_utils.save_args_from_target(ckpt)
-        #         orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
+        save model
+        if (args.local_rank == 0) and (update%3000==0):
+            if args.save_path:
+                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
 
-        #     if args.local_rank == 0 and args.track:
-        #         wandb.finish()
+            if args.local_rank == 0 and args.track:
+                wandb.finish()
 
         # try:
         #   sample_query_response = samples_to_print["query_response"][0]
@@ -625,15 +625,15 @@ def train(args: Args):
     policy_state = jax_utils.unreplicate(policy_state)
 
     # save model
-#     if args.local_rank == 0:
-#         if args.save_path:
-#             ckpt = {"policy_model": policy_state, "args": vars(args)}
-#             orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-#             save_args = orbax_utils.save_args_from_target(ckpt)
-#             orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
+    if args.local_rank == 0:
+        if args.save_path:
+            ckpt = {"policy_model": policy_state, "args": vars(args)}
+            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            save_args = orbax_utils.save_args_from_target(ckpt)
+            orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
 
-#         if args.local_rank == 0 and args.track:
-#             wandb.finish()
+        if args.local_rank == 0 and args.track:
+            wandb.finish()
 
 
 if __name__ == "__main__":
