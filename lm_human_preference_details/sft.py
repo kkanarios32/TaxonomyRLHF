@@ -56,6 +56,7 @@ class SFTParams:
     percent_warmup: int = 0.1
 
     opt_choice = "adamw" # using adamw
+    eval_every = 1000
     
 
 
@@ -201,7 +202,7 @@ def adam_tf_style(
 
 # a pytorch dataset
 class MySFTDataset(IterableDataset):
-    def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None):
+    def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None, split="train"):
         self.generator = generator
         self.tokenizer = tokenizer
         self.query_length = query_length
@@ -211,9 +212,10 @@ class MySFTDataset(IterableDataset):
         token_to_index = tokenizer.get_vocab()
         self.start_token = token_to_index[start_text] if self.start_text else None
         self.end_token = token_to_index[end_text] if self.end_text else None
+        self.split = split
 
     def __iter__(self):
-        for query, response in self.generator("train", self.seed, shuffle=False):
+        for query, response in self.generator(self.split, self.seed, shuffle=False):
             query_tokens = self.tokenizer.encode(query)
 
             if self.start_token is not None:
@@ -361,34 +363,53 @@ def prepare_policy_forward_and_policy_generate(args, tokenizer):
 class SFTStatistics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
 
+def sft_loss(policy_state, mb_query_responses, tokenizer):
+    output = policy_state.apply_fn(policy_state.params, mb_query_responses)
+
+    logits = output.logits[:, args.task.query_length - 1 : -1, :]
+    logits /= args.task.temperature
+    responses = mb_query_responses[:, args.task.query_length :]
+    
+    response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
+    filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
+    response_logprobs=response_logprobs*filter_for_pad_logprobs
+    
+    sft_loss_val = -jnp.sum(response_logprobs)
+            
+    current_sft_stats = dict(loss=sft_loss_val)
+
+    return sft_loss_val, current_sft_stats
+
 def train_step(
     policy_state,
     sft_stats,
     mb_query_responses,
     tokenizer,
+    loss_fn,
     args
 ):
-    def sft_loss(params):
-        output = policy_state.apply_fn(params, mb_query_responses)
 
-        logits = output.logits[:, args.task.query_length - 1 : -1, :]
-        logits /= args.task.temperature
-        responses = mb_query_responses[:, args.task.query_length :]
-        
-        response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
-        filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
-        response_logprobs=response_logprobs*filter_for_pad_logprobs
-        
-        sft_loss_val = -jnp.sum(response_logprobs)
-                
-        current_sft_stats = dict(loss=sft_loss_val)
-
-        return sft_loss_val, current_sft_stats
-
-    grad_fn = jax.value_and_grad(sft_loss, has_aux=True)
-    (loss, current_sft_stats), grads = grad_fn(policy_state.params)
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, current_sft_stats), grads = grad_fn(policy_state,
+                                               mb_query_responses,
+                                               tokenizer)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
+    
+    sft_stats = sft_stats.merge(SFTStatistics.gather_from_model_output(**current_sft_stats))
+
+    return policy_state, sft_stats
+
+def eval_step(
+    policy_state,
+    sft_stats,
+    mb_query_responses,
+    tokenizer,
+    loss_fn,
+    args
+):
+    jax.lax.stop_gradient(policy_state.params)
+    loss, current_sft_stats = loss_fn(policy_state, mb_query_responses, tokenizer)
     
     sft_stats = sft_stats.merge(SFTStatistics.gather_from_model_output(**current_sft_stats))
 
@@ -498,22 +519,41 @@ def train(args: Args):
     policy_state = jax_utils.replicate(policy_state)
     
 
-    dataset = MySFTDataset(
+    train_dataset = MySFTDataset(
         DATASET[args.task.query_dataset],
         tokenizer,
         args.task.query_length,
         seed=local_seed,
         start_text=args.task.start_text,
         end_text=args.task.end_text,
+        split="train",
+    )
+
+    eval_dataset = MySFTDataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=local_seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split="test",
     )
     
     
-    dataloader = DataLoader(
-        dataset,
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.sft.batch_size,
         collate_fn=numpy_collate,
     )
-    iter_dataloader = iter(dataloader)
+
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=args.sft.batch_size,
+        collate_fn=numpy_collate,
+    )
+
+    train_iter_dataloader = iter(train_dataloader)
+    eval_iter_dataloader = iter(eval_dataloader)
     
 
     def train_update(policy_state, input_ids, response_ids, sft_stats):
@@ -530,6 +570,7 @@ def train(args: Args):
                 sft_stats=sft_stats,
                 mb_query_responses=mb_query_responses,
                 tokenizer=tokenizer,
+                loss_fn = sft_loss,
                 args=args
             )
             return (policy_state, sft_stats), None
@@ -590,6 +631,9 @@ def train(args: Args):
             response_ids = response_ids,
             sft_stats=sft_stats
         )
+
+        if (args.local_rank == 0) and (update%args.eval_every==0):
+            pass
         
         # save model
         if (args.local_rank == 0) and (update%3000==0):
