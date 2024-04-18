@@ -51,7 +51,7 @@ class KTOParams:
     # Learning rate, epochs, episodes
     opt_choice = "adamw"
 
-    total_episodes: int = 93500
+    total_episodes: int = 118000
     num_warmup: int = 20 #not used
     percent_warmup: int = 20 #not used
 
@@ -137,6 +137,10 @@ class Args:
     
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
+    
+    eval_every = 500
+    save_every = 2000
+    
 
 
 def scale_by_adam_tf_style(

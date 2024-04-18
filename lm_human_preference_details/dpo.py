@@ -52,7 +52,7 @@ class DPOParams:
     # Learning rate, epochs, episodes
     opt_choice = "rmsprop"
     
-    total_episodes: int = 93500
+    total_episodes: int = 11800
     noptepochs: int = 1
     lr: float = 1e-6
     eps: float = 1e-6
@@ -137,8 +137,8 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
 
-    eval_every: int = 500
-    save_every: int = 10
+    eval_every: int = 50
+    save_every: int = 300
 
 def scale_by_adam_tf_style(
     b1: float = 0.9,
@@ -895,15 +895,15 @@ def train(args: Args):
     
     policy_state = jax_utils.unreplicate(policy_state)
     # save model
-#     if args.local_rank == 0:
-#         if args.save_path:
-#             ckpt = {"policy_model": policy_state, "args": vars(args)}
-#             orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-#             save_args = orbax_utils.save_args_from_target(ckpt)
-#             orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
+    if args.local_rank == 0:
+        if args.save_path:
+            ckpt = {"policy_model": policy_state, "args": vars(args)}
+            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            save_args = orbax_utils.save_args_from_target(ckpt)
+            orbax_checkpointer.save(args.save_path, ckpt, save_args=save_args, force=True)
 
-#         if args.local_rank == 0 and args.track:
-#             wandb.finish()
+        if args.local_rank == 0 and args.track:
+            wandb.finish()
 
 
 if __name__ == "__main__":
