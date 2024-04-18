@@ -27,8 +27,10 @@ from rich.pretty import pprint
 from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, FlaxAutoModelForCausalLM, GenerationConfig
-
 from data import DATASET
+
+import orbax.checkpoint
+import orbax.checkpoint as ocp
 
 @dataclass
 class DPOParams:
@@ -53,13 +55,16 @@ class DPOParams:
     """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
     
     total_episodes: int = 93500
-    num_warmup: int = 20
     noptepochs: int = 1
-    lr: float = 5e-6
+    lr: float = 1e-6
     eps: float = 1e-5
 
+    # Learning rate warm-up stuff
+    num_warmup: int = 20
+    percent_warmup: int = 0.1
+
     # DPO params
-    beta: float = 0.7 # as suggested in the DPO paper
+    beta: float = 0.5 # as suggested in the DPO paper
    
 
 @dataclass
@@ -117,7 +122,7 @@ class Args:
     
     save_path: str = "dpo_models/"
     """Where to save the model"""
-    
+
     task: TaskParams = field(default_factory=TaskParams)
     dpo: DPOParams = field(default_factory=DPOParams)
 
@@ -131,9 +136,11 @@ class Args:
     learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the devices that script will use"""
     
-    global_learner_decices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
+    global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
 
+    eval_every: int = 500
+    save_every: int = 10
 
 def scale_by_adam_tf_style(
     b1: float = 0.9,
@@ -205,7 +212,7 @@ def adam_tf_style(
 
 # a pytorch dataset
 class MyDPODataset(IterableDataset):
-    def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None):
+    def __init__(self, generator, tokenizer, query_length, seed, start_text=None, end_text=None, split="train"):
         self.generator = generator
         self.tokenizer = tokenizer
         self.query_length = query_length
@@ -215,9 +222,10 @@ class MyDPODataset(IterableDataset):
         token_to_index = tokenizer.get_vocab()
         self.start_token = token_to_index[start_text] if self.start_text else None
         self.end_token = token_to_index[end_text] if self.end_text else None
+        self.split = split
 
     def __iter__(self):
-        for query, response_pref, response_rej in self.generator("train", self.seed, shuffle=False):
+        for query, response_pref, response_rej in self.generator(self.split, self.seed, shuffle=False):
             query_tokens = self.tokenizer.encode(query)
 
             if self.start_token is not None:
@@ -267,6 +275,27 @@ class MyDPODataset(IterableDataset):
                                                 )
 
             yield query_output["input_ids"], np.squeeze(response_output_pref["input_ids"]), np.squeeze(response_output_rej["input_ids"])
+
+
+def get_batch_loader(tokenizer, args, seed=0, split="train"):
+    dataset = MyDPODataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.dpo.batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+
+    return dataloader
 
 
 def numpy_collate(batch):
@@ -401,23 +430,24 @@ def prepare_policy_forward_and_policy_generate(args, tokenizer):
 class DPOStatistics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
 
-def train_step(
-    policy_state, # with respect to the current model
-    ref_model, # with respect to the reference model
-    dpo_stats,
-    mb_query_responses_pref,
-    mb_query_responses_rej,
-    tokenizer,
-    args
-):
-    def dpo_loss(params):
+
+def compute_loss(params, 
+                 apply_fn,
+                 ref_model, # reference model
+                 mb_query_responses_pref,
+                 mb_query_responses_rej,
+                 tokenizer,
+                 args,
+                 eval=False,   
+                ):
+
         """
         Implementing preference loss based on https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py#L45
         """
 
         # From policy
-        output_pref_theta = policy_state.apply_fn(params, mb_query_responses_pref)
-        output_rej_theta = policy_state.apply_fn(params, mb_query_responses_rej)
+        output_pref_theta = apply_fn(params, mb_query_responses_pref)
+        output_rej_theta = apply_fn(params, mb_query_responses_rej)
 
         logits_pref_theta =  output_pref_theta.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
         logits_rej_theta =  output_rej_theta.logits[:, args.task.query_length - 1 : -1, :] / args.task.temperature
@@ -469,8 +499,30 @@ def train_step(
 
         return dpo_loss_val, current_dpo_stats
 
-    grad_fn = jax.value_and_grad(dpo_loss, has_aux=True)
-    (dpo_loss, current_dpo_stats), grads = grad_fn(policy_state.params)
+
+def train_step(
+    policy_state, # with respect to the current model
+    ref_model, # with respect to the reference model
+    dpo_stats,
+    mb_query_responses_pref,
+    mb_query_responses_rej,
+    tokenizer,
+    args
+):
+
+    loss_fn = functools.partial(
+        compute_loss,
+        apply_fn=policy_state.apply_fn,
+        ref_model=ref_model,
+        mb_query_responses_pref=mb_query_responses_pref,
+        mb_query_responses_rej=mb_query_responses_rej,        
+        tokenizer=tokenizer,
+        args=args,
+        eval=False
+    )
+
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, current_dpo_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
     
@@ -479,27 +531,55 @@ def train_step(
     return policy_state, dpo_stats
 
 
+def eval_step(
+        policy_state,
+        ref_model,
+        mb_query_responses_pref,
+        mb_query_responses_rej,        
+        tokenizer,
+        args,        
+):
+    loss_fn = functools.partial(
+        compute_loss,
+        apply_fn=policy_state.apply_fn,
+        ref_model=ref_model,
+        mb_query_responses_pref=mb_query_responses_pref,
+        mb_query_responses_rej=mb_query_responses_rej,        
+        tokenizer=tokenizer,
+        args=args,
+        eval=True
+    )
+
+    params = jax.lax.stop_gradient(policy_state.params)
+    loss, _ = loss_fn(params)
+
+    return loss
+
+
 def linear_schedule(count, args):
     # anneal learning rate linearly
     frac = 1.0 - (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_updates
     return args.dpo.lr * frac
 
 def linear_warmup_schedule(count, args):
-    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_warmup]))
-    return 1e-7*(1-frac) + args.dpo.lr * frac
+    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / (args.dpo.percent_warmup*args.dpo.num_updates)]))
+    return args.dpo.lr * frac
+
+def cosine_schedule(count, args):
+    return optax.cosine_decay_schedule(init_value=args.dpo.lr, decay_steps = args.dpo.num_updates, alpha=1e-7)(count)
 
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
     args.dpo.world_size = jax.process_count()
     learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
-    global_learner_decices = [
+    global_learner_devices = [
         global_devices[d_id + process_index * len(local_devices)]
         for process_index in range(args.dpo.world_size)
         for d_id in args.learner_device_ids
     ]
-    pprint({"global_learner_decices": global_learner_decices})
-    args.global_learner_decices = [str(item) for item in global_learner_decices]
+    pprint({"global_learner_devices": global_learner_devices})
+    args.global_learner_devices = [str(item) for item in global_learner_devices]
     args.learner_devices = [str(item) for item in learner_devices]
     args.local_rank = jax.process_index()
     args.dpo.batch_size = int(args.dpo.local_batch_size * len(args.learner_devices) * args.dpo.world_size)
@@ -572,13 +652,15 @@ def train(args: Args):
         optim_choice = adam_tf_style
     elif (args.dpo.opt_choice=="rmsprop"):
         optim_choice = optax.rmsprop
+    elif (args.dpo.opt_choice=="adamw"):
+        optim_choice = optax.adamw
     else:
         optim_choice = optax.adam
     
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(optim_choice)(
-            learning_rate = functools.partial(linear_warmup_schedule, args=args), 
+            learning_rate = functools.partial(cosine_schedule, args=args), 
             eps=args.dpo.eps,
         ),
         every_k_schedule=args.dpo.gradient_accumulation_steps,
@@ -590,6 +672,9 @@ def train(args: Args):
     policy_state = jax_utils.replicate(policy_state)
     
     print("Train state created")
+
+    train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
+    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='test')
 
     # Changed to DPO
     dataset = MyDPODataset(
@@ -685,15 +770,87 @@ def train(args: Args):
         donate_argnums=(0,),
     )
     
-    print("parallelized train update initialized")
+    def eval(policy_state, input_ids, response_pref_ids, response_rej_ids):
+        queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
 
-    print("===training policy===")
+        query_responses_pref = jnp.concatenate((input_ids, response_pref_ids), axis=1)
+        query_responses_rej = jnp.concatenate((input_ids, response_rej_ids), axis=1)
+
+        def dpo_single_microbatch(inp):
+            mb_query_responses_pref, mb_query_responses_rej = inp
+
+            loss_val = eval_step(
+                policy_state=policy_state,
+                mb_query_responses_pref=mb_query_responses_pref,
+                mb_query_responses_rej=mb_query_responses_rej,
+                tokenizer=tokenizer,
+                args=args,
+            )
+            return loss_val
+        
+        # That is -> query_responses, logprobs = inp
+            
+        # For both rejected and preferred query responses
+        mbs_query_responses_pref = einops.rearrange(
+                query_responses_pref,
+                "(c m) l -> c m l",
+                c=args.dpo.gradient_accumulation_steps,
+        )
+
+        mbs_query_responses_rej = einops.rearrange(
+                query_responses_rej,
+                "(c m) l -> c m l",
+                c=args.dpo.gradient_accumulation_steps,
+        )
+
+        eval_epoch = jax.vmap(dpo_single_microbatch, in_axes=0)
+        dpo_stats = jnp.sum(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
+        dpo_stats = jax.lax.pmean(dpo_stats, "batch")
+
+        samples_to_print = dict(
+            query_response_pref=query_responses_pref[0] # Printing preferred responses
+        )
+
+        return dpo_stats, samples_to_print
+
+    p_eval = jax.pmap(
+        eval,
+        axis_name="batch",
+        donate_argnums=(0,),
+    )
+
+    print("initialized eval")
+
     global_step = 0
     
     print("starting train loop")
 
     # Changed this to have both responses
-    for update, [input_ids, response_pref_ids, response_rej_ids] in tqdm(enumerate(iter_dataloader)):
+    for update, [input_ids, response_pref_ids, response_rej_ids] in tqdm(enumerate(train_dataloader)):
+        # doing eval stuff
+        if (args.local_rank == 0) and (update%args.eval_every==0) and (update>0):
+            losses = []
+
+            for eval_batch, [eval_input_ids, eval_response_pref_ids, eval_response_rej_ids] in tqdm(enumerate(eval_dataloader)):
+                eval_input_ids = common_utils.shard(eval_input_ids)
+
+                # For both responses
+                eval_response_pref_ids = common_utils.shard(eval_response_pref_ids)
+                eval_response_rej_ids = common_utils.shard(eval_response_rej_ids)
+
+                dpo_stats, samples_to_print = p_eval(
+                    policy_state=policy_state,
+                    input_ids=eval_input_ids,
+                    response_pref_ids=eval_response_pref_ids, 
+                    response_rej_ids=eval_response_pref_ids,
+                )
+                losses.append(dpo_stats)
+
+            loss = np.mean(np.array(losses))
+
+            writer.add_scalar("dpo/eval_loss/total", loss, update)
+
+    
         global_step += args.dpo.batch_size
         input_ids = common_utils.shard(input_ids)
 
@@ -710,12 +867,12 @@ def train(args: Args):
             dpo_stats=dpo_stats
         )
         
-#         if (args.local_rank == 0) and (update>0) and (update%1000==0):
-#             if args.save_path:
-#                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
-#                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-#                 save_args = orbax_utils.save_args_from_target(ckpt)
-#                 orbax_checkpointer.save(args.save_path+"model_"+str(update)+"/", ckpt, save_args=save_args, force=True)
+        if (args.local_rank == 0) and (update%args.save_every==0): # (update>0) and (update%1000==0):
+            if args.save_path:
+                ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path + f"model_{update}", ckpt, save_args=save_args, force=True)
 
 #             if args.local_rank == 0 and args.track:
 #                 wandb.finish()
