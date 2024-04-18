@@ -112,8 +112,10 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2" # I will probably need to change to the SFT model
+    base_model: str = "kkanarios/gpt2-tldr-sft" # I will probably need to change to the SFT model
     """the name of the pretrained model to use"""
+    
+    tokenizer_base_model = "gpt2"
     
     print_sample_output_freq: int = 0
     """How often to print sample output"""
@@ -612,7 +614,7 @@ def train(args: Args):
         pprint(args)
     local_seed = args.seed + args.local_rank * 100003  # Prime
     tokenizer = AutoTokenizer.from_pretrained(
-        args.base_model,
+        args.tokenizer_base_model,
         padding_side="right",
     )
     # we use the padding token manually but do not resize the token embedding of the model
