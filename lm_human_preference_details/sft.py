@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
+import orbax.checkpoint
 from tqdm import tqdm
 
 import einops
@@ -16,6 +17,7 @@ import numpy as np
 import optax
 import orbax
 import tyro
+import orbax.checkpoint as ocp
 from clu import metrics
 from flax import jax_utils
 from flax.training import common_utils, orbax_utils
@@ -98,6 +100,9 @@ class Args:
     
     wandb_entity: Optional[str] = None
     """the entity (team) of wandb's project"""
+
+    debug: bool = False
+    """print queries and additional debugging output"""
     
     cuda: bool = True
     """Whether to use cuda if available."""
@@ -131,7 +136,7 @@ class Args:
     """the total devices (across all nodes and machines) that script will use"""
     eval_every: int = 500
 
-    save_every: int = 3000
+    save_every: int = 10
 
 
 def scale_by_adam_tf_style(
@@ -660,8 +665,9 @@ def train(args: Args):
     )
     print("initialized eval")
     
+
     global_step = 0
-    
+
     print("Starting Training")
     for update, [input_ids, response_ids] in tqdm(enumerate(train_dataloader)):
         if (args.local_rank == 0) and (update%args.eval_every==0) and (update > 0):
@@ -698,15 +704,16 @@ def train(args: Args):
                 save_args = orbax_utils.save_args_from_target(ckpt)
                 orbax_checkpointer.save(args.save_path + f"model_{update}", ckpt, save_args=save_args, force=True)
 
-        # try:
-        #   sample_query_response = samples_to_print["query_response"][0]
-        #     console.print(
-        #         f"[green][bold]{'Query'}:[/]\n"
-        #         + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-        #         + f"[yellow][bold]{'Response'}:[/]\n"
-        #         )
-        # except Exception as e:
-        #     print(e)
+        if args.debug:
+            try:
+                sample_query_response = samples_to_print["query_response"][0]
+                console.print(
+                    f"[green][bold]{'Query'}:[/]\n"
+                    + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+                    + f"[yellow][bold]{'Response'}:[/]\n"
+                )
+            except Exception as e:
+                print(e)
 
         
         # RL metrics aggregated at the batch level
