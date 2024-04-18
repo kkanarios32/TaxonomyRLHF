@@ -392,7 +392,7 @@ class SFTStatistics(metrics.Collection):
     #eval_loss: metrics.Average.from_output("eval_loss")
 
 
-def compute_loss(params, apply_fn, mb_query_responses, tokenizer, args, eval=False):
+def compute_loss(params, apply_fn, mb_query_responses, tokenizer, args):
     output = apply_fn(params, mb_query_responses)
 
     logits = output.logits[:, args.task.query_length - 1 : -1, :]
@@ -423,8 +423,7 @@ def train_step(
         apply_fn=policy_state.apply_fn,
         mb_query_responses=mb_query_responses,
         tokenizer=tokenizer,
-        args=args,
-        eval=False
+        args=args
     )
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, current_sft_stats), grads = grad_fn(policy_state.params)
@@ -448,8 +447,7 @@ def eval_step(
         apply_fn=policy_state.apply_fn,
         mb_query_responses=mb_query_responses,
         tokenizer=tokenizer,
-        args=args,
-        eval=True
+        args=args
     )
     params = jax.lax.stop_gradient(policy_state.params)
     loss, _ = loss_fn(params)

@@ -58,7 +58,7 @@ class KTOParams:
     percent_warmup: int = 20
 
     noptepochs: int = 1
-    lr: float = 5e-6
+    lr: float = 5e-5
     eps: float = 1e-5
 
     # Params for KTO
