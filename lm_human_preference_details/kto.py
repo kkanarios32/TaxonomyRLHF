@@ -49,22 +49,20 @@ class KTOParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    opt_choice = optax.rmsprop
-    use_tensorflow_adam: bool = False
-    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
+    opt_choice = "adamw"
 
-    total_episodes: int = 1000000
-    num_warmup: int = 20
-    percent_warmup: int = 20
+    total_episodes: int = 93500
+    num_warmup: int = 20 #not used
+    percent_warmup: int = 20 #not used
 
     noptepochs: int = 1
     lr: float = 5e-5
-    eps: float = 1e-5
+    eps: float = 1e-6
 
     # Params for KTO
     lam_D = 1.2
     lam_U = 1
-    beta = 0.1
+    beta = 0.5
 
 @dataclass
 class TaskParams:
@@ -539,6 +537,13 @@ def linear_warmup_schedule(count, args):
 
     return args.kto.lr * frac
 
+def constant_schedule(count, args):
+    # anneal learning rate linearly
+    return args.kto.lr
+
+def cosine_schedule(count, args):
+    return optax.cosine_decay_schedule(init_value=args.kto.lr, decay_steps = args.kto.num_updates, alpha=1e-7)(count)
+
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
@@ -637,7 +642,7 @@ def train(args: Args):
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(optim_choice)(
-            learning_rate=functools.partial(linear_warmup_schedule, args=args),
+            learning_rate=functools.partial(cosine_schedule, args=args),
             eps=args.kto.eps,
         ),
         every_k_schedule=args.kto.gradient_accumulation_steps,

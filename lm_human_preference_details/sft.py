@@ -470,7 +470,7 @@ def cosine_schedule(count, args):
 
 
 def linear_warmup_schedule(count, args):
-    frac = jnp.min(jnp.array([1.0, (count // (args.sft.nminibatches * args.sft.noptepochs)) / (args.sft.percent_warmup*args.sft.num_updates)]))
+    frac = jnp.min(jnp.array([1.0, (count // (args.sft.nminibatches * args.sft.noptepochs)) / (args.sft.num_warmup)]))
     return args.sft.lr * frac
 
 

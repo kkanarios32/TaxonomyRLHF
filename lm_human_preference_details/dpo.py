@@ -35,11 +35,11 @@ import orbax.checkpoint as ocp
 @dataclass
 class DPOParams:
     # Batch Size stuff
-    local_batch_size: int = 16
+    local_batch_size: int = 64
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 16
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -50,18 +50,16 @@ class DPOParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    opt_choice = optax.rmsprop
-    use_tensorflow_adam: bool = False
-    """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
+    opt_choice = "rmsprop"
     
     total_episodes: int = 93500
     noptepochs: int = 1
     lr: float = 1e-6
-    eps: float = 1e-5
+    eps: float = 1e-6
 
     # Learning rate warm-up stuff
-    num_warmup: int = 20
-    percent_warmup: int = 0.1
+    num_warmup: int = 150
+    percent_warmup: int = 0.1 # not used
 
     # DPO params
     beta: float = 0.5 # as suggested in the DPO paper
@@ -437,8 +435,7 @@ def compute_loss(params,
                  mb_query_responses_pref,
                  mb_query_responses_rej,
                  tokenizer,
-                 args,
-                 eval=False,   
+                 args  
                 ):
 
         """
@@ -517,8 +514,7 @@ def train_step(
         mb_query_responses_pref=mb_query_responses_pref,
         mb_query_responses_rej=mb_query_responses_rej,        
         tokenizer=tokenizer,
-        args=args,
-        eval=False
+        args=args
     )
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -546,8 +542,7 @@ def eval_step(
         mb_query_responses_pref=mb_query_responses_pref,
         mb_query_responses_rej=mb_query_responses_rej,        
         tokenizer=tokenizer,
-        args=args,
-        eval=True
+        args=args
     )
 
     params = jax.lax.stop_gradient(policy_state.params)
@@ -562,11 +557,11 @@ def linear_schedule(count, args):
     return args.dpo.lr * frac
 
 def linear_warmup_schedule(count, args):
-    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / (args.dpo.percent_warmup*args.dpo.num_updates)]))
+    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / (args.dpo.num_warmup)]))
     return args.dpo.lr * frac
 
 def cosine_schedule(count, args):
-    return optax.cosine_decay_schedule(init_value=args.dpo.lr, decay_steps = args.dpo.num_updates, alpha=1e-7)(count)
+    return optax.cosine_decay_schedule(init_value=args.dpo.lr, decay_steps = args.dpo.num_updates, alpha=0)(count)
 
 def train(args: Args):
     local_devices = jax.local_devices()
@@ -660,7 +655,7 @@ def train(args: Args):
 
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(optim_choice)(
-            learning_rate = functools.partial(cosine_schedule, args=args), 
+            learning_rate = functools.partial(linear_warmup_schedule, args=args), 
             eps=args.dpo.eps,
         ),
         every_k_schedule=args.dpo.gradient_accumulation_steps,
