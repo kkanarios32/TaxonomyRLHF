@@ -2,15 +2,20 @@ import random
 import re
 
 import ftfy
-from datasets import load_dataset
 import json
+import os
+from datasets import load_dataset
 from tqdm import tqdm
 from utils import blobs
 
+dir = os.path.dirname(__file__)
+dir = os.path.join(dir, "datasets")
+
 def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
     assert split in ["test", "train", "valid"]
+    file = os.path.join(dir, "tldr", f"{split}.jsonl")
 
-    with open("/home/ckausik/TaxonomyRLHF/lm_human_preference_details/train.jsonl") as f:
+    with open(file) as f:
         datas = list(f)
     
     if shuffle:

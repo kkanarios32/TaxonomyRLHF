@@ -36,9 +36,9 @@ class SFTParams:
     #Batch Size stuff
     local_batch_size: int = 8
     local_mini_batch_size: tyro.conf.Suppress[int] = None
-    batch_size: tyro.conf.Suppress[int] = None
+    batch_size: tyro.conf.Suppress[int] = 8
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 2
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -56,7 +56,6 @@ class SFTParams:
     percent_warmup: int = 0.1
 
     opt_choice = "adamw" # using adamw
-    eval_every = 1000
     
 
 
@@ -128,8 +127,11 @@ class Args:
     learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the devices that script will use"""
     
-    global_learner_decices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
+    global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
+    eval_every: int = 500
+
+    save_every: int = 3000
 
 
 def scale_by_adam_tf_style(
@@ -255,6 +257,26 @@ class MySFTDataset(IterableDataset):
             yield query_output["input_ids"], np.squeeze(response_output["input_ids"])
 
 
+def get_batch_loader(tokenizer, args, seed=0, split="train"):
+    dataset = MySFTDataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.sft.batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+
+    return dataloader
+
 
 def numpy_collate(batch):
     if isinstance(batch[0], np.ndarray):
@@ -362,15 +384,17 @@ def prepare_policy_forward_and_policy_generate(args, tokenizer):
 @flax.struct.dataclass
 class SFTStatistics(metrics.Collection):
     loss: metrics.Average.from_output("loss")
+    #eval_loss: metrics.Average.from_output("eval_loss")
 
-def sft_loss(policy_state, mb_query_responses, tokenizer):
-    output = policy_state.apply_fn(policy_state.params, mb_query_responses)
+
+def compute_loss(params, apply_fn, mb_query_responses, tokenizer, args, eval=False):
+    output = apply_fn(params, mb_query_responses)
 
     logits = output.logits[:, args.task.query_length - 1 : -1, :]
     logits /= args.task.temperature
     responses = mb_query_responses[:, args.task.query_length :]
     
-    response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, responses)
+    response_logprobs = -1*optax.softmax_cross_entropy_with_integer_labels(logits, responses)
     filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
     response_logprobs=response_logprobs*filter_for_pad_logprobs
     
@@ -380,19 +404,25 @@ def sft_loss(policy_state, mb_query_responses, tokenizer):
 
     return sft_loss_val, current_sft_stats
 
+
 def train_step(
     policy_state,
     sft_stats,
     mb_query_responses,
     tokenizer,
-    loss_fn,
     args
 ):
 
+    loss_fn = functools.partial(
+        compute_loss, 
+        apply_fn=policy_state.apply_fn,
+        mb_query_responses=mb_query_responses,
+        tokenizer=tokenizer,
+        args=args,
+        eval=False
+    )
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, current_sft_stats), grads = grad_fn(policy_state,
-                                               mb_query_responses,
-                                               tokenizer)
+    (loss, current_sft_stats), grads = grad_fn(policy_state.params)
     grads = jax.lax.pmean(grads, "batch")
     policy_state = policy_state.apply_gradients(grads=grads)
     
@@ -400,20 +430,26 @@ def train_step(
 
     return policy_state, sft_stats
 
+
 def eval_step(
     policy_state,
-    sft_stats,
     mb_query_responses,
     tokenizer,
-    loss_fn,
     args
 ):
-    jax.lax.stop_gradient(policy_state.params)
-    loss, current_sft_stats = loss_fn(policy_state, mb_query_responses, tokenizer)
-    
-    sft_stats = sft_stats.merge(SFTStatistics.gather_from_model_output(**current_sft_stats))
 
-    return policy_state, sft_stats
+    loss_fn = functools.partial(
+        compute_loss, 
+        apply_fn=policy_state.apply_fn,
+        mb_query_responses=mb_query_responses,
+        tokenizer=tokenizer,
+        args=args,
+        eval=True
+    )
+    params = jax.lax.stop_gradient(policy_state.params)
+    loss, _ = loss_fn(params)
+    
+    return loss
 
 
 def linear_schedule(count, args):
@@ -435,18 +471,19 @@ def linear_warmup_schedule(count, args):
     return args.sft.lr * frac
 
 
+print("====Begin Training====")
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
     args.sft.world_size = jax.process_count()
     learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
-    global_learner_decices = [
+    global_learner_devices = [
         global_devices[d_id + process_index * len(local_devices)]
         for process_index in range(args.sft.world_size)
         for d_id in args.learner_device_ids
     ]
-    pprint({"global_learner_decices": global_learner_decices})
-    args.global_learner_decices = [str(item) for item in global_learner_decices]
+    pprint({"global_learner_devices": global_learner_devices})
+    args.global_learner_devices = [str(item) for item in global_learner_devices]
     args.learner_devices = [str(item) for item in learner_devices]
     args.local_rank = jax.process_index()
     args.sft.batch_size = int(args.sft.local_batch_size * len(args.learner_devices) * args.sft.world_size)
@@ -495,7 +532,6 @@ def train(args: Args):
         policy_generate,
         policy_params,
     ) = prepare_policy_forward_and_policy_generate(args, tokenizer)
-    ref_policy_params = copy.deepcopy(policy_params)
 
     if args.sft.opt_choice == "adam_tf":
         optim_choice = adam_tf_style
@@ -519,41 +555,8 @@ def train(args: Args):
     policy_state = jax_utils.replicate(policy_state)
     
 
-    train_dataset = MySFTDataset(
-        DATASET[args.task.query_dataset],
-        tokenizer,
-        args.task.query_length,
-        seed=local_seed,
-        start_text=args.task.start_text,
-        end_text=args.task.end_text,
-        split="train",
-    )
-
-    eval_dataset = MySFTDataset(
-        DATASET[args.task.query_dataset],
-        tokenizer,
-        args.task.query_length,
-        seed=local_seed,
-        start_text=args.task.start_text,
-        end_text=args.task.end_text,
-        split="test",
-    )
-    
-    
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.sft.batch_size,
-        collate_fn=numpy_collate,
-    )
-
-    eval_dataloader = DataLoader(
-        eval_dataset,
-        batch_size=args.sft.batch_size,
-        collate_fn=numpy_collate,
-    )
-
-    train_iter_dataloader = iter(train_dataloader)
-    eval_iter_dataloader = iter(eval_dataloader)
+    train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
+    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='test')
     
 
     def train_update(policy_state, input_ids, response_ids, sft_stats):
@@ -570,7 +573,6 @@ def train(args: Args):
                 sft_stats=sft_stats,
                 mb_query_responses=mb_query_responses,
                 tokenizer=tokenizer,
-                loss_fn = sft_loss,
                 args=args
             )
             return (policy_state, sft_stats), None
@@ -617,10 +619,66 @@ def train(args: Args):
         axis_name="batch",
         donate_argnums=(0,),
     )
+
+    def eval(policy_state, input_ids, response_ids):
+        queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
+
+        query_responses = jnp.concatenate((input_ids, response_ids), axis=1)
+
+        def sft_single_microbatch(inp):
+            mb_query_responses = inp
+
+            loss_val = eval_step(
+                policy_state=policy_state,
+                mb_query_responses=mb_query_responses,
+                tokenizer=tokenizer,
+                args=args
+            )
+            return loss_val
+
+        # That is -> query_responses, logprobs = inp
+        mbs_query_responses = einops.rearrange(
+            query_responses,
+            "(c m) l -> c m l",
+            c=args.sft.gradient_accumulation_steps,
+        )
+
+        eval_epoch = jax.vmap(sft_single_microbatch, in_axes=0)
+
+        sft_stats = jnp.sum(eval_epoch(mbs_query_responses))
+        sft_stats = jax.lax.pmean(sft_stats, "batch")
+
+        samples_to_print = dict(
+            query_response=query_responses[0]
+        )
+        return sft_stats, samples_to_print
+
+    p_eval = jax.pmap(
+        eval,
+        axis_name="batch",
+        donate_argnums=(0,),
+    )
+    print("initialized eval")
     
     global_step = 0
     
-    for update, [input_ids, response_ids] in tqdm(enumerate(iter_dataloader)):
+    print("Starting Training")
+    for update, [input_ids, response_ids] in tqdm(enumerate(train_dataloader)):
+        if (args.local_rank == 0) and (update%args.eval_every==0) and (update > 0):
+            losses = []
+            for eval_batch, [eval_input_ids, eval_response_ids] in enumerate(eval_dataloader):
+                eval_input_ids = common_utils.shard(eval_input_ids)
+                eval_response_ids = common_utils.shard(eval_response_ids)
+                sft_stats, samples_to_print = p_eval(
+                    policy_state=policy_state,
+                    input_ids=eval_input_ids,
+                    response_ids = eval_response_ids,
+                )
+                losses.append(sft_stats)
+
+            loss = np.mean(np.array(losses))
+            writer.add_scalar("sft/eval_loss/total", loss, update)
+
         global_step += args.sft.batch_size
         input_ids = common_utils.shard(input_ids)
         response_ids = common_utils.shard(response_ids)
@@ -631,20 +689,14 @@ def train(args: Args):
             response_ids = response_ids,
             sft_stats=sft_stats
         )
-
-        if (args.local_rank == 0) and (update%args.eval_every==0):
-            pass
         
         # save model
-        if (args.local_rank == 0) and (update%3000==0):
+        if (args.local_rank == 0) and (update%args.save_every==0):
             if args.save_path:
                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
                 save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path+"model_"+update+"/", ckpt, save_args=save_args, force=True)
-
-            if args.local_rank == 0 and args.track:
-                wandb.finish()
+                orbax_checkpointer.save(args.save_path + f"model_{update}", ckpt, save_args=save_args, force=True)
 
         # try:
         #   sample_query_response = samples_to_print["query_response"][0]
