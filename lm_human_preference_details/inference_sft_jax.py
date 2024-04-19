@@ -76,7 +76,7 @@ dataset = MySFTDataset(
         DATASET["tldr-sft"],
         tokenizer,
         600,
-        seed=12,
+        seed=10,
         start_text=None,
         end_text=None,
     )
@@ -89,8 +89,9 @@ query_shapes=[]
 
 lm_backbone = FlaxAutoModelForCausalLM.from_pretrained("gpt2")
 
-orbax_checkpointer = ocp.PyTreeCheckpointer()
-sft_model = orbax_checkpointer.restore('sftmodels/')['policy_model']['params']['lm_backbone_params']['params']
+# orbax_checkpointer = ocp.PyTreeCheckpointer()
+# sft_model = orbax_checkpointer.restore('sftmodels/')['policy_model']['params']['lm_backbone_params']['params']
+sft_model = lm_backbone.params
 
 print(sft_model.keys())
 
@@ -156,41 +157,51 @@ def policy_generate(
         )
         query_length = input_ids.shape[1]
         return jnp.concatenate((queries, output.sequences[:, query_length:]), axis=1)
+
+print("lm backbone created")
+i=0
+for elem in dataset:
+    query, response, query_words, response_words = elem
+    i+=1
+    if i==2:
+        break
     
-query, response, query_words, response_words = next(dataset)
+# query, response, query_words, response_words = dataset[1]
 query = np.reshape(query, (1,600))
 response = np.reshape(response, (1,424))
 query_response = jnp.concatenate((query, response), axis=1)
 
 print("query response processed")
-print(response[:100])
-logits = policy_forward(query_response).logits[:, 600:, :]
-print("logits made")
-response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, response)
-filter_for_pad_logprobs = (response!=tokenizer.pad_token_id)
-response_logprobs=response_logprobs*filter_for_pad_logprobs
-print("cross entropy taken, logprobs filtered")
+# print(response[:100])
+# logits = policy_forward(query_response).logits[:, 600:, :]
+# print("logits made")
+# response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, response)
+# filter_for_pad_logprobs = (response!=tokenizer.pad_token_id)
+# response_logprobs=response_logprobs*filter_for_pad_logprobs
+# print("cross entropy taken, logprobs filtered")
 
-print(response_logprobs)
-sft_loss_val = -jnp.sum(response_logprobs)
-print(sft_loss_val)
+# # print(response_logprobs)
+# sft_loss_val = -jnp.sum(response_logprobs)
+# print(sft_loss_val)
 
 print(query_words)
 print(response_words)
 
 gen_response = policy_generate(query)
-new_response = gen_response[:, 600:]
-print(type(gen_response), (np.array(gen_response)).shape)
-logits = policy_forward(gen_response).logits[:, 600:, :]
-print("logits made again")
-new_response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, new_response)
-filter_for_pad_logprobs = (new_response!=tokenizer.pad_token_id)
-new_response_logprobs=new_response_logprobs*filter_for_pad_logprobs
-print("cross entropy taken again, logprobs filtered again")
 
-print(new_response_logprobs)
-sft_loss_val = -jnp.sum(new_response_logprobs)
-print(sft_loss_val)
+# new_response = gen_response[:, 600:]
+# print(type(gen_response), (np.array(gen_response)).shape)
+# logits = policy_forward(gen_response).logits[:, 600:, :]
+# print("logits made again")
+# new_response_logprobs = -optax.softmax_cross_entropy_with_integer_labels(logits, new_response)
+# filter_for_pad_logprobs = (new_response!=tokenizer.pad_token_id)
+# new_response_logprobs=new_response_logprobs*filter_for_pad_logprobs
+# print("cross entropy taken again, logprobs filtered again")
 
-print(tokenizer.decode(gen_response[0]))
+# # print(new_response_logprobs)
+# sft_loss_val = -jnp.sum(new_response_logprobs)
+# print(sft_loss_val)
+
+print("new response:")
+print(tokenizer.decode(gen_response[0, 600:]))
 
