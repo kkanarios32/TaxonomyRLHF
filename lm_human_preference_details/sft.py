@@ -110,7 +110,7 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2"
+    base_model: str = "gpt2-medium"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
