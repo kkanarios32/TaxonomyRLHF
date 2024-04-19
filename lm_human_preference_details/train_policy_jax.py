@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
 
+from tqdm import tqdm
 import einops
 import flax
 import flax.linen as nn
@@ -41,7 +42,12 @@ class AdaptiveKLParams:
 class RewardHParams:
     kl_coef: float = 0.15
     adaptive_kl: Optional[AdaptiveKLParams] = field(default_factory=AdaptiveKLParams)
-    trained_model: Optional[str] = "models/"
+    trained_model: Optional[str] = os.path.join(
+        os.path.dirname(__file__),
+        "models",
+        "reward"
+    )
+
     label_dataset: tyro.conf.Suppress[Optional[str]] = None
 
 
@@ -112,11 +118,21 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2"
+    base_model: str = "kkanarios/gpt2-tldr-sft" # I will probably need to change to the SFT model
     """the name of the pretrained model to use"""
+    tokenizer_base_model = "gpt2"
+    """the name of pretrained tokenizer to use"""
+
+    debug: bool = False
     print_sample_output_freq: int = 0
     """How often to print sample output"""
-    save_path: str = "models/policy/"
+    save_path: str = os.path.join(
+        os.path.dirname(__file__),
+        "models",
+        "policy",
+        "ppo"
+    )
+
     """Where to save the model"""
     use_tensorflow_adam: bool = True
     """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
@@ -131,7 +147,7 @@ class Args:
     "the device ids that script will use"
     learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the devices that script will use"""
-    global_learner_decices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
+    global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
 
 
@@ -202,7 +218,6 @@ def adam_tf_style(
         scale_by_adam_tf_style(b1=b1, b2=b2, eps=eps, eps_root=eps_root, mu_dtype=mu_dtype),
         _scale_by_learning_rate(learning_rate),
     )
-
 
 class AdaptiveKLController:
     def __init__(self, init_kl_coef: float, hparams: AdaptiveKLParams):
@@ -564,13 +579,13 @@ def train(args: Args):
     global_devices = jax.devices()
     args.ppo.world_size = jax.process_count()
     learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
-    global_learner_decices = [
+    global_learner_devices = [
         global_devices[d_id + process_index * len(local_devices)]
         for process_index in range(args.ppo.world_size)
         for d_id in args.learner_device_ids
     ]
-    pprint({"global_learner_decices": global_learner_decices})
-    args.global_learner_decices = [str(item) for item in global_learner_decices]
+    pprint({"global_learner_devices": global_learner_devices})
+    args.global_learner_devices = [str(item) for item in global_learner_devices]
     args.learner_devices = [str(item) for item in learner_devices]
     args.local_rank = jax.process_index()
     args.ppo.batch_size = int(args.ppo.local_batch_size * len(args.learner_devices) * args.ppo.world_size)
@@ -612,7 +627,7 @@ def train(args: Args):
         pprint(args)
     local_seed = args.seed + args.local_rank * 100003  # Prime
     tokenizer = AutoTokenizer.from_pretrained(
-        args.base_model,
+        args.tokenizer_base_model,
         padding_side="right",
     )
     # we use the padding token manually but do not resize the token embedding of the model
@@ -851,7 +866,7 @@ def train(args: Args):
     print("===training policy===")
     global_step = 0
 
-    for update in range(1, args.ppo.num_updates + 1):
+    for update in tqdm(range(1, args.ppo.num_updates + 1)):
         global_step += args.ppo.batch_size
         input_ids = next(iter_dataloader)
         input_ids = common_utils.shard(input_ids)
@@ -863,19 +878,20 @@ def train(args: Args):
             kl_ctl_value=np.array([kl_ctl.value] * input_ids.shape[0]),
         )
 
-        try:
-            sample_kl = samples_to_print["kl"][0].item()
-            sample_score = samples_to_print["scores"][0].item()
-            sample_query_response = samples_to_print["query_response"][0]
-            console.print(
-                f"[green][bold]{'Query'}:[/]\n"
-                + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
-                + f"[yellow][bold]{'Response'}:[/]\n"
-                + f"[yellow]{tokenizer.decode(sample_query_response[args.task.query_length:], skip_special_tokens=True)}[/]\n\n"
-                + f"[red]score: {sample_score}, kl: {sample_kl}, total reward: {sample_score - kl_ctl.value * sample_kl} [/]"
-            )
-        except Exception as e:
-            print(e)
+        if args.debug:
+            try:
+                sample_kl = samples_to_print["kl"][0].item()
+                sample_score = samples_to_print["scores"][0].item()
+                sample_query_response = samples_to_print["query_response"][0]
+                console.print(
+                    f"[green][bold]{'Query'}:[/]\n"
+                    + f"[green]{ tokenizer.decode(sample_query_response[:args.task.query_length], skip_special_tokens=True)}[/]\n\n"
+                    + f"[yellow][bold]{'Response'}:[/]\n"
+                    + f"[yellow]{tokenizer.decode(sample_query_response[args.task.query_length:], skip_special_tokens=True)}[/]\n\n"
+                    + f"[red]score: {sample_score}, kl: {sample_kl}, total reward: {sample_score - kl_ctl.value * sample_kl} [/]"
+                )
+            except Exception as e:
+                print(e)
 
         # Rollout metrics
         rollout_stats = common_utils.get_metrics([rollout_stats])

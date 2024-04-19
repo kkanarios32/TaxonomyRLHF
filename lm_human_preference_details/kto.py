@@ -870,7 +870,7 @@ def train(args: Args):
 
         eval_epoch = jax.vmap(kto_single_microbatch_eval, in_axes=0)
 
-        kto_stats = jnp.sum(eval_epoch(mbs_query_responses, mbs_chosen_labels, kl_z_ref*jnp.ones(args.kto.eval_accum_steps)))
+        kto_stats = jnp.mean(eval_epoch(mbs_query_responses, mbs_chosen_labels, kl_z_ref*jnp.ones(args.kto.eval_accum_steps)))
         kto_stats = jax.lax.pmean(kto_stats, "batch")
 
         samples_to_print = dict(

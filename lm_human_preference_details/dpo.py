@@ -825,7 +825,7 @@ def train(args: Args):
         )
 
         eval_epoch = jax.vmap(dpo_single_microbatch_eval, in_axes=0)
-        dpo_stats = jnp.sum(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
+        dpo_stats = jnp.mean(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
         dpo_stats = jax.lax.pmean(dpo_stats, "batch")
 
         samples_to_print = dict(
