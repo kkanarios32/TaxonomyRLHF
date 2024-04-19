@@ -52,7 +52,7 @@ class DPOParams:
     # Learning rate, epochs, episodes
     opt_choice = "rmsprop"
     
-    total_episodes: int = 11800
+    total_episodes: int = 118000
     noptepochs: int = 1
     lr: float = 1e-6
     eps: float = 1e-6
@@ -671,7 +671,7 @@ def train(args: Args):
     print("Train state created")
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='test')
+    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='validation')
 
     # Changed to DPO
     dataset = MyDPODataset(

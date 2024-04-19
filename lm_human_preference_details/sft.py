@@ -38,9 +38,9 @@ class SFTParams:
     #Batch Size stuff
     local_batch_size: int = 8
     local_mini_batch_size: tyro.conf.Suppress[int] = None
-    batch_size: tyro.conf.Suppress[int] = 8
+    batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 2
+    gradient_accumulation_steps: int = 1
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -51,7 +51,7 @@ class SFTParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    total_episodes: int = 118000
+    total_episodes: int = 93500
     noptepochs: int = 1
     lr: float = 5e-5
     eps: float = 1e-6
@@ -110,7 +110,7 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2"
+    base_model: str = "gpt2-medium"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
@@ -134,6 +134,7 @@ class Args:
     
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
+    
     eval_every: int = 500
 
     save_every: int = 10
