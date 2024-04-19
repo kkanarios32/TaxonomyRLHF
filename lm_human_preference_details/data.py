@@ -37,7 +37,7 @@ def tldr_kto_random_generator(split="train", seed=0, shuffle=False):
     Generator for DPO. Outputs two different summaries: preferred and rejected.
     """
 
-    assert split in ["test", "train", "valid"]
+    assert split in ["train", "validation"]
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 
@@ -71,7 +71,7 @@ def tldr_dpo_generator(split="train", seed=0, shuffle=False):
     Generator for DPO. Outputs two different summaries: preferred and rejected.
     """
 
-    assert split in ["test", "train", "valid"]
+    assert split in ["train", "validation"]
 
     datas = load_dataset('openai/summarize_from_feedback',
                        'comparisons', 

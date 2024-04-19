@@ -40,7 +40,7 @@ class SFTParams:
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 4
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -110,7 +110,7 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2-medium"
+    base_model: str = "gpt2"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
@@ -135,9 +135,9 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every: int = 500
+    eval_every: int = 100
 
-    save_every: int = 10
+    save_every: int = 2000
 
 
 def scale_by_adam_tf_style(
@@ -701,7 +701,7 @@ def train(args: Args):
                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
                 save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path + f"model_{update}", ckpt, save_args=save_args, force=True)
+                orbax_checkpointer.save(args.save_path + f"model_{update}/", ckpt, save_args=save_args, force=True)
 
         if args.debug:
             try:

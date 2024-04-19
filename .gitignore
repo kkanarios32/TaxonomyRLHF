@@ -2,6 +2,9 @@ slurm
 wandb
 runs
 *.jsonl
+sftmodels
+dpomodels
+ktomodels
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

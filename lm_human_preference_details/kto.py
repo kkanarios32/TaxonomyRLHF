@@ -905,7 +905,7 @@ def train(args: Args):
                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
                 save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(args.save_path + f"model_{update}", ckpt, save_args=save_args, force=True)
+                orbax_checkpointer.save(args.save_path + f"model_{update}/", ckpt, save_args=save_args, force=True)
 
         
         #    if args.local_rank == 0 and args.track:
