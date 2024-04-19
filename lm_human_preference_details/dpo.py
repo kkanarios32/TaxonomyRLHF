@@ -864,7 +864,7 @@ def train(args: Args):
             dpo_stats=dpo_stats
         )
         
-        if (args.local_rank == 0) and (update%args.save_every==0): # (update>0) and (update%1000==0):
+        if (args.local_rank == 0) and (update>0) and (update%args.save_every==0): # (update>0) and (update%1000==0):
             if args.save_path:
                 ckpt = {"policy_model": jax_utils.unreplicate(policy_state), "args": vars(args)}
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
