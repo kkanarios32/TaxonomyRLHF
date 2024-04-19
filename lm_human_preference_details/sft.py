@@ -53,7 +53,7 @@ class SFTParams:
     # Learning rate, epochs, episodes
     total_episodes: int = 93500
     noptepochs: int = 1
-    lr: float = 5e-5
+    lr: float = 8e-5
     eps: float = 1e-6
     percent_warmup: int = 0.1
 
@@ -110,7 +110,7 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2-medium"
+    base_model: str = "gpt2"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
