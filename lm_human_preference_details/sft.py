@@ -40,7 +40,7 @@ class SFTParams:
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 16
+    gradient_accumulation_steps: int = 64
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -110,13 +110,13 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2"
+    base_model: str = "gpt2-medium"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "sftmodels-small/"
+    save_path: str = "sftmodels-medium/"
     """Where to save the model"""
     
     task: TaskParams = field(default_factory=TaskParams)
