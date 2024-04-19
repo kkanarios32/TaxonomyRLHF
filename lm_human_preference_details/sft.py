@@ -36,11 +36,11 @@ from data import DATASET
 @dataclass
 class SFTParams:
     #Batch Size stuff
-    local_batch_size: int = 8
+    local_batch_size: int = 128
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 16
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -116,7 +116,7 @@ class Args:
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "sftmodels/"
+    save_path: str = "sftmodels-small/"
     """Where to save the model"""
     
     task: TaskParams = field(default_factory=TaskParams)
@@ -135,9 +135,9 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every: int = 100
+    eval_every: int = 10
 
-    save_every: int = 2000
+    save_every: int = 100
 
 
 def scale_by_adam_tf_style(
@@ -404,7 +404,7 @@ def compute_loss(params, apply_fn, mb_query_responses, tokenizer, args):
     filter_for_pad_logprobs = (responses!=tokenizer.pad_token_id)
     response_logprobs=response_logprobs*filter_for_pad_logprobs
     
-    sft_loss_val = -jnp.sum(response_logprobs)
+    sft_loss_val = -jnp.mean(jnp.sum(response_logprobs, axis=1))
             
     current_sft_stats = dict(loss=sft_loss_val)
 

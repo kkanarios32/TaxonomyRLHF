@@ -490,7 +490,7 @@ def compute_loss(params,
         
         dpo_loss = -flax.linen.log_sigmoid(args.dpo.beta*temp)
         
-        dpo_loss_val = jnp.sum(dpo_loss)
+        dpo_loss_val = jnp.mean(dpo_loss)
 
         # dpo_loss_val = jnp.sum(policy_chosen_logps) # this should boil down to SFT if you want to debug
         
@@ -582,7 +582,7 @@ def train(args: Args):
     args.dpo.batch_size = int(args.dpo.local_batch_size * len(args.learner_devices) * args.dpo.world_size)
     args.dpo.minibatch_size = exact_div(args.dpo.batch_size, args.dpo.nminibatches)
     args.dpo.local_mini_batch_size = exact_div(args.dpo.local_batch_size, args.dpo.nminibatches)
-    args.dpo.local_micro_batch_size = 1 # exact_div(args.dpo.local_mini_batch_size, args.dpo.gradient_accumulation_steps)
+    args.dpo.local_micro_batch_size = exact_div(args.dpo.local_mini_batch_size, args.dpo.gradient_accumulation_steps)
     # `per_rank_rollout_batch_size` is our `args.dpo.local_batch_size`
     # `per_rank_minibatch_size` is our `args.dpo.local_mini_batch_size`
     args.dpo.num_updates = args.dpo.total_episodes // args.dpo.batch_size

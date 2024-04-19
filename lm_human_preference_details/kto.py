@@ -466,7 +466,7 @@ def compute_loss(
         
     assert kto_des.ndim==1
         
-    kto_loss_val = jnp.sum(kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels))
+    kto_loss_val = jnp.mean(kto_des*mb_chosen_labels + kto_undes*(1-mb_chosen_labels))
 
     current_kto_stats = dict(loss=kto_loss_val)
 
