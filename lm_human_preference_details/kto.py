@@ -40,6 +40,9 @@ class KTOParams:
     mini_batch_size: tyro.conf.Suppress[int] = None
     gradient_accumulation_steps: int = 1
     """gradient accumulation steps"""
+    eval_batch_size: int = 8
+    eval_accum_steps: int = 4
+
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
     world_size: tyro.conf.Suppress[int] = None
@@ -140,7 +143,7 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every = 1
+    eval_every = 500
     save_every = 2000
     
 
@@ -282,7 +285,7 @@ def get_batch_loader(tokenizer, args, seed=0, split="train"):
 
     dataloader = DataLoader(
         dataset,
-        batch_size=args.kto.batch_size,
+        batch_size=args.kto.eval_batch_size,
         collate_fn=numpy_collate,
         drop_last=True
     )
@@ -837,17 +840,17 @@ def train(args: Args):
         mbs_query_responses = einops.rearrange(
                 query_responses,
                 "(c m) l -> c m l",
-                c=args.kto.gradient_accumulation_steps,
+                c=args.kto.eval_accum_steps,
             )
         mbs_chosen_labels = einops.rearrange(
                 chosen_labels,
                 "(c m) l -> c m l",
-                c=args.kto.gradient_accumulation_steps,
+                c=args.kto.eval_accum_steps,
             )
 
         eval_epoch = jax.vmap(kto_single_microbatch_eval, in_axes=0)
 
-        kto_stats = jnp.sum(eval_epoch(mbs_query_responses, mbs_chosen_labels, kl_z_ref))
+        kto_stats = jnp.sum(eval_epoch(mbs_query_responses, mbs_chosen_labels, kl_z_ref*jnp.ones(args.kto.eval_accum_steps)))
         kto_stats = jax.lax.pmean(kto_stats, "batch")
 
         samples_to_print = dict(
