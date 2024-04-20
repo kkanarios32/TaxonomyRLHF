@@ -140,7 +140,7 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every = 500
+    eval_every = 1
     save_every = 2000
     
 
@@ -663,7 +663,7 @@ def train(args: Args):
     print("Train state created")
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='validation')
+    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='validation[:6000]')
 
     dataset = MyKTODataset(
         DATASET[args.task.query_dataset],
@@ -793,7 +793,6 @@ def train(args: Args):
         queries = right_padding_to_left_padding(input_ids, tokenizer.pad_token_id)
 
         query_responses = jnp.concatenate((input_ids, response_ids), axis=1)
-        
         response_ids_reversed = response_ids[::-1, :]
         
         kl_query_responses = jnp.concatenate((input_ids, response_ids_reversed), axis=1)
@@ -820,8 +819,8 @@ def train(args: Args):
         kl_z_ref = jnp.sum(kl_z_ref)/response_ids.shape[0]
         kl_z_ref = jnp.max(jnp.array([0,kl_z_ref]))
        
-        def kto_single_microbatch(inp):
-            mb_query_responses, mb_chosen_labels, kl_z_ref = inp
+        def kto_single_microbatch_eval(inp1, inp2, inp3):
+            mb_query_responses, mb_chosen_labels, kl_z_ref = inp1, inp2, inp3
 
             loss_val = eval_step(
                 policy_state=policy_state,
@@ -845,8 +844,11 @@ def train(args: Args):
                 "(c m) l -> c m l",
                 c=args.kto.gradient_accumulation_steps,
             )
-        eval_epoch = jax.vmap(kto_single_microbatch, in_axes=0)
+
+        eval_epoch = jax.vmap(kto_single_microbatch_eval, in_axes=0)
+
         kto_stats = jnp.sum(eval_epoch(mbs_query_responses, mbs_chosen_labels, kl_z_ref))
+        kto_stats = jax.lax.pmean(kto_stats, "batch")
 
         samples_to_print = dict(
             query_response=query_responses[0]
