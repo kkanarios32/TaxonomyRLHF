@@ -863,7 +863,7 @@ def train(args: Args):
                     policy_state=policy_state,
                     input_ids=eval_input_ids,
                     response_pref_ids=eval_response_pref_ids, 
-                    response_rej_ids=eval_response_pref_ids,
+                    response_rej_ids=eval_response_rej_ids,
                 )
                 losses.append(dpo_stats)
 
