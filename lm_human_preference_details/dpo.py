@@ -694,7 +694,7 @@ def train(args: Args):
     print("Train state created")
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader_eval(tokenizer, args, seed=local_seed, split='validation')
+    eval_dataloader = get_batch_loader_eval(tokenizer, args, seed=local_seed, split='validation[:6000]')
 
     # Changed to DPO
     dataset = MyDPODataset(
