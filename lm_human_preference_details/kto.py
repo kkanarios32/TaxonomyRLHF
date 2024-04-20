@@ -34,14 +34,14 @@ from data import DATASET
 @dataclass
 class KTOParams:
     #Batch Size stuff
-    local_batch_size: int = 8
+    local_batch_size: int = 64
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
     gradient_accumulation_steps: int = 1
     """gradient accumulation steps"""
     eval_batch_size: int = 8
-    eval_accum_steps: int = 4
+    eval_accum_steps: int = 1
 
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -143,7 +143,7 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every = 500
+    eval_every = 50
     save_every = 2000
     
 
@@ -273,6 +273,26 @@ class MyKTODataset(IterableDataset):
 
 
 def get_batch_loader(tokenizer, args, seed=0, split="train"):
+    dataset = MyKTODataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.kto.batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+    return dataloader
+
+
+def get_batch_loader_eval(tokenizer, args, seed=0, split="train"):
     dataset = MyKTODataset(
         DATASET[args.task.query_dataset],
         tokenizer,
@@ -666,7 +686,7 @@ def train(args: Args):
     print("Train state created")
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='validation[:6000]')
+    eval_dataloader = get_batch_loader_eval(tokenizer, args, seed=local_seed, split='validation[:6000]')
 
     dataset = MyKTODataset(
         DATASET[args.task.query_dataset],
