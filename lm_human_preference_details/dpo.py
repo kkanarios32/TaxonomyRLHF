@@ -41,6 +41,9 @@ class DPOParams:
     mini_batch_size: tyro.conf.Suppress[int] = None
     gradient_accumulation_steps: int = 16
     """gradient accumulation steps"""
+    
+    eval_batch_size: int = 32
+    eval_accum_steps: int = 4
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
     world_size: tyro.conf.Suppress[int] = None
@@ -291,6 +294,26 @@ def get_batch_loader(tokenizer, args, seed=0, split="train"):
     dataloader = DataLoader(
         dataset,
         batch_size=args.dpo.batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+
+    return dataloader
+
+def get_batch_loader_eval(tokenizer, args, seed=0, split="train"):
+    dataset = MyDPODataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.dpo.eval_batch_size,
         collate_fn=numpy_collate,
         drop_last=True
     )
@@ -671,7 +694,7 @@ def train(args: Args):
     print("Train state created")
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='validation')
+    eval_dataloader = get_batch_loader_eval(tokenizer, args, seed=local_seed, split='validation')
 
     # Changed to DPO
     dataset = MyDPODataset(
@@ -773,11 +796,12 @@ def train(args: Args):
         query_responses_pref = jnp.concatenate((input_ids, response_pref_ids), axis=1)
         query_responses_rej = jnp.concatenate((input_ids, response_rej_ids), axis=1)
 
-        def dpo_single_microbatch(inp):
-            mb_query_responses_pref, mb_query_responses_rej = inp
+        def dpo_single_microbatch_eval(inp1, inp2):
+            mb_query_responses_pref, mb_query_responses_rej = inp1, inp2
 
             loss_val = eval_step(
                 policy_state=policy_state,
+                ref_model=ref_model,
                 mb_query_responses_pref=mb_query_responses_pref,
                 mb_query_responses_rej=mb_query_responses_rej,
                 tokenizer=tokenizer,
@@ -791,16 +815,16 @@ def train(args: Args):
         mbs_query_responses_pref = einops.rearrange(
                 query_responses_pref,
                 "(c m) l -> c m l",
-                c=args.dpo.gradient_accumulation_steps,
+                c=args.dpo.eval_accum_steps,
         )
 
         mbs_query_responses_rej = einops.rearrange(
                 query_responses_rej,
                 "(c m) l -> c m l",
-                c=args.dpo.gradient_accumulation_steps,
+                c=args.dpo.eval_accum_steps,
         )
 
-        eval_epoch = jax.vmap(dpo_single_microbatch, in_axes=0)
+        eval_epoch = jax.vmap(dpo_single_microbatch_eval, in_axes=0)
         dpo_stats = jnp.sum(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
         dpo_stats = jax.lax.pmean(dpo_stats, "batch")
 
