@@ -64,15 +64,15 @@ class SFTParams:
 @dataclass
 class TaskParams:
     # Query params
-    query_length: int = 150
-    query_dataset: str = "fam-rel-sft-shuffled"
+    query_length: int = 300
+    query_dataset: str = "fam-rel-sft-shuffled-3-children"
     query_prefix: str = ""
     query_suffix: str = ""
     start_text: Optional[str] = None
     end_text: Optional[str] = None
 
     # Response params
-    response_length: int = 50
+    response_length: int = 100
 
     # Truncate response after the first occurrence of this token at or after index after when sampling.
     truncate_token: int = 13
@@ -95,7 +95,7 @@ class Args:
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     
-    wandb_project_name: str = "sfttrain-fam-rel-shuffled"
+    wandb_project_name: str = "sfttrain-fam-rel-shuffled-3-children"
     """the wandb's project name"""
     
     wandb_entity: Optional[str] = None
@@ -116,7 +116,7 @@ class Args:
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "sftmodels-fam-rel-shuffled/"
+    save_path: str = "sftmodels-fam-rel-shuffled-3-children/"
     """Where to save the model"""
     
     task: TaskParams = field(default_factory=TaskParams)
@@ -135,7 +135,7 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every_frac: int = 0.01
+    eval_every_frac: int = 0.02
     eval_every: int = None
 
     save_every_frac: int = 0.2

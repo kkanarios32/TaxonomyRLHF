@@ -75,7 +75,7 @@ tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 print("tokenizer initialized")
 
 dataset = MySFTDataset(
-        DATASET["fam-rel-sft"],
+        DATASET["fam-rel-sft-shuffled-3-children"],
         tokenizer,
         600,
         seed=10,
