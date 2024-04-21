@@ -7,6 +7,8 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 
+num_resp = 16
+
 print("imports done")
 
 # a pytorch dataset
@@ -89,11 +91,12 @@ query_shapes=[]
 
 lm_backbone = FlaxAutoModelForCausalLM.from_pretrained("gpt2")
 
-# orbax_checkpointer = ocp.PyTreeCheckpointer()
-# sft_model = orbax_checkpointer.restore('sftmodels/')['policy_model']['params']['lm_backbone_params']['params']
-sft_model = lm_backbone.params
+orbax_checkpointer = ocp.PyTreeCheckpointer()
+dpo_model = orbax_checkpointer.restore('/scratch/tewaria_root/tewaria0/ckausik/dpo_models/')['policy_model']['params']['lm_backbone_params']['params']
 
-print(sft_model.keys())
+print(dpo_model.keys())
+
+sft_model = FlaxAutoModelForCausalLM.from_pretrained("kkanarios/gpt2-tldr-sft").params
 
 # disable `pad_token_id` and `eos_token_id` because we just want to
 # generate tokens without truncation / padding
@@ -143,13 +146,14 @@ generation_config = GenerationConfig(
     )
 
 def policy_generate(
+        model_params,
         queries: jnp.ndarray,
     ):
         input_ids = queries
         attention_mask = input_ids != tokenizer.pad_token_id
         input_ids = jnp.where(attention_mask, queries, 0)
         output = lm_backbone.generate(
-            params=sft_model,
+            params=model_params,
             input_ids=input_ids,
             generation_config=generation_config,
             attention_mask=attention_mask.astype("i4"),
@@ -163,8 +167,17 @@ i=0
 for elem in dataset:
     query, response, query_words, response_words = elem
     i+=1
-    if i==2:
+    if i==num_resp:
         break
+        
+        
+# new_query_tokens = tokenizer.encode("What is the capital of Hungary?")
+# query = tokenizer.pad({"input_ids": new_query_tokens},
+#                                                  padding="max_length",
+#                                                  max_length=600,
+#                                                  return_tensors = "np",
+#                                                  return_attention_mask=False
+#                                                 )["input_ids"]
     
 # query, response, query_words, response_words = dataset[1]
 query = np.reshape(query, (1,600))
@@ -187,7 +200,9 @@ print("query response processed")
 print(query_words)
 print(response_words)
 
-gen_response = policy_generate(query)
+print("what is the capital of Hungary?")
+
+gen_response_dpo = policy_generate(dpo_model, query)
 
 # new_response = gen_response[:, 600:]
 # print(type(gen_response), (np.array(gen_response)).shape)
@@ -202,6 +217,10 @@ gen_response = policy_generate(query)
 # sft_loss_val = -jnp.sum(new_response_logprobs)
 # print(sft_loss_val)
 
-print("new response:")
-print(tokenizer.decode(gen_response[0, 600:]))
+print("new dpo response:")
+print(tokenizer.decode(gen_response_dpo[0, 600:]))
 
+print("new sft response:")
+gen_response_sft = policy_generate(sft_model, query)
+
+print(tokenizer.decode(gen_response_sft[0, 600:]))
