@@ -95,7 +95,7 @@ class Args:
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     
-    wandb_project_name: str = "sfttrain-fam-rel"
+    wandb_project_name: str = "sfttrain-fam-rel-shuffled"
     """the wandb's project name"""
     
     wandb_entity: Optional[str] = None
@@ -116,7 +116,7 @@ class Args:
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "sftmodels-fam-rel/"
+    save_path: str = "sftmodels-fam-rel-shuffled/"
     """Where to save the model"""
     
     task: TaskParams = field(default_factory=TaskParams)
