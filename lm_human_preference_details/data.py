@@ -185,6 +185,7 @@ DATASET = {
     "cnndm": cnndm_generator,
     "tldr-sft": tldr_filtered_sft_generator,
     "fam-rel-sft": fam_rel_sft_generator,
+    "fam-rel-sft-shuffled": fam_rel_shuffled_resp_sft_generator,
     "tldr-dpo": tldr_dpo_generator,
     "tldr-kto-random": tldr_kto_random_generator,
     "dummy": dummy_generator,

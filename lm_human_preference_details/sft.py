@@ -65,7 +65,7 @@ class SFTParams:
 class TaskParams:
     # Query params
     query_length: int = 150
-    query_dataset: str = "fam-rel-sft"
+    query_dataset: str = "fam-rel-sft-shuffled"
     query_prefix: str = ""
     query_suffix: str = ""
     start_text: Optional[str] = None
