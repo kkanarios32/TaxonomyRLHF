@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 from typing import List, Optional
 
+from tqdm import tqdm
 import flax
 import flax.linen as nn
 import jax
@@ -75,8 +76,11 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2"
+    base_model: str = "kkanarios/gpt2-tldr-sft" # I will probably need to change to the SFT model
     """the name of the pretrained model to use"""
+    
+    tokenizer_base_model = "gpt2"
+    """the name of pretrained tokenizer to use"""
     label_dataset: str = "sentiment/offline_5k.json"
     """the name of the dataset to use for labels in `https://huggingface.co/datasets/vwxyzjn/lm-human-preferences`"""
     local_batch_size: int = 4
@@ -107,9 +111,14 @@ class Args:
     """Whether, before training, to normalize the rewards on the policy to the scales on the training buffer. (For comparisons, just use mean 0, var 1.)"""
     normalize_after: bool = True
     """Whether, after training, to normalize the rewards on the ref policy to mean 0, var 1 (so the KL coefficient always has the same meaning)."""
-    print_sample_output_freq: int = 10
+    print_sample_output_freq: int = 1000
     """How often to print sample output"""
-    save_path: str = "models/"
+    save_path: str = os.path.join(
+        os.path.dirname(__file__),
+        "models",
+        "reward"
+    )
+
     """Where to save the model"""
     use_tensorflow_adam: bool = True
     """Whether to use tensorflow-style Adam optimizer instead of PyTorch's"""
@@ -625,7 +634,7 @@ def train(args: Args):
         pprint(args)
     local_seed = args.seed + args.local_rank * 100003  # Prime
     tokenizer = AutoTokenizer.from_pretrained(
-        args.base_model,
+        args.tokenizer_base_model,
         padding_side="right",
     )
     # we use the padding token manually but do not resize the token embedding of the model
@@ -729,7 +738,7 @@ def train(args: Args):
 
     print("===training reward model===")
 
-    for global_step, train_batch in enumerate(train_iter):
+    for global_step, train_batch in enumerate(tqdm(train_iter)):
         train_batch = common_utils.shard(train_batch)
         reward_state, train_metrics = p_train_step(reward_state, train_batch)
         writer.add_scalar(
@@ -761,7 +770,15 @@ def train(args: Args):
                 val_metrics[key] = value.mean()
                 writer.add_scalar(f"test/{key}", val_metrics[key], global_step)
 
-            print(f"gloabl_step: {global_step} | " + f"test/accuracy {val_metrics['accuracy']}")
+            print(f"global_step: {global_step} | " + f"test/accuracy {val_metrics['accuracy']}")
+        
+        # save model
+        if (args.local_rank == 0) and (global_step>0) and (global_step%args.save_every==0):
+            if args.save_path:
+                ckpt = {"reward_model": jax_utils.unreplicate(reward_state), "args": vars(args)}
+                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                orbax_checkpointer.save(args.save_path + f"model_{global_step}/", ckpt, save_args=save_args, force=True)
 
     if args.normalize_after:
         print("===Normalize reward model *after* training===")

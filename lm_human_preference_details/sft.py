@@ -649,7 +649,7 @@ def train(args: Args):
 
         eval_epoch = jax.vmap(sft_single_microbatch, in_axes=0)
 
-        sft_stats = jnp.sum(eval_epoch(mbs_query_responses))
+        sft_stats = jnp.mean(eval_epoch(mbs_query_responses))
         sft_stats = jax.lax.pmean(sft_stats, "batch")
 
         samples_to_print = dict(
