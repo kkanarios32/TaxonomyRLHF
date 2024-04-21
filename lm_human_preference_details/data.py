@@ -31,6 +31,21 @@ def tldr_filtered_sft_generator(split, seed=0, shuffle=False):
         summary = data['summary']
         yield query, summary
         
+def fam_rel_sft_generator(split, seed=0, shuffle=False):
+    assert split in ["eval", "train"]
+    file = os.path.join(dir, "fam_rel", f"fam_sft_{split}_data.jsonl")
+
+    with open(file) as f:
+        datas = list(f)
+    
+    if shuffle:
+        random.seed(seed)
+        random.shuffle(datas)
+
+    for data in datas:
+        data = json.loads(data)
+        yield data["query"], data["response"]
+        
         
 def tldr_kto_random_generator(split="train", seed=0, shuffle=False): 
     """
@@ -154,6 +169,7 @@ DATASET = {
     "books": books_generator,
     "cnndm": cnndm_generator,
     "tldr-sft": tldr_filtered_sft_generator,
+    "fam-rel-sft": fam_rel_sft_generator,
     "tldr-dpo": tldr_dpo_generator,
     "tldr-kto-random": tldr_kto_random_generator,
     "dummy": dummy_generator,

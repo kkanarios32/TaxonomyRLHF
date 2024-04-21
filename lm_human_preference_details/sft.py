@@ -36,11 +36,11 @@ from data import DATASET
 @dataclass
 class SFTParams:
     #Batch Size stuff
-    local_batch_size: int = 128
+    local_batch_size: int = 64
     local_mini_batch_size: tyro.conf.Suppress[int] = None
     batch_size: tyro.conf.Suppress[int] = None
     mini_batch_size: tyro.conf.Suppress[int] = None
-    gradient_accumulation_steps: int = 64
+    gradient_accumulation_steps: int = 8
     """gradient accumulation steps"""
     local_micro_batch_size: tyro.conf.Suppress[int] = None
     """per rank micro batch size"""
@@ -51,7 +51,7 @@ class SFTParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    total_episodes: int = 93500
+    total_episodes: int = 60000
     noptepochs: int = 1
     lr: float = 8e-5
     eps: float = 1e-6
@@ -64,15 +64,15 @@ class SFTParams:
 @dataclass
 class TaskParams:
     # Query params
-    query_length: int = 600
-    query_dataset: str = "tldr-sft"
+    query_length: int = 150
+    query_dataset: str = "fam-rel-sft"
     query_prefix: str = ""
     query_suffix: str = ""
     start_text: Optional[str] = None
     end_text: Optional[str] = None
 
     # Response params
-    response_length: int = 400
+    response_length: int = 50
 
     # Truncate response after the first occurrence of this token at or after index after when sampling.
     truncate_token: int = 13
@@ -95,7 +95,7 @@ class Args:
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     
-    wandb_project_name: str = "sfttrain"
+    wandb_project_name: str = "sfttrain-fam-rel"
     """the wandb's project name"""
     
     wandb_entity: Optional[str] = None
@@ -110,13 +110,13 @@ class Args:
     run_name: tyro.conf.Suppress[str] = None
     """TO BE FILLED: a unique name of this run"""
 
-    base_model: str = "gpt2-medium"
+    base_model: str = "gpt2"
     """the name of the pretrained model to use"""
     
     print_sample_output_freq: int = 0
     """How often to print sample output"""
     
-    save_path: str = "sftmodels-medium/"
+    save_path: str = "sftmodels-fam-rel/"
     """Where to save the model"""
     
     task: TaskParams = field(default_factory=TaskParams)
@@ -135,9 +135,11 @@ class Args:
     global_learner_devices: tyro.conf.Suppress[int] = None  # real type is `List[str]`
     """the total devices (across all nodes and machines) that script will use"""
     
-    eval_every: int = 10
+    eval_every_frac: int = 0.01
+    eval_every: int = None
 
-    save_every: int = 100
+    save_every_frac: int = 0.2
+    save_every: int = None
 
 
 def scale_by_adam_tf_style(
@@ -497,6 +499,9 @@ def train(args: Args):
     # `per_rank_rollout_batch_size` is our `args.sft.local_batch_size`
     # `per_rank_minibatch_size` is our `args.sft.local_mini_batch_size`
     args.sft.num_updates = args.sft.total_episodes // args.sft.batch_size
+    args.eval_every = int(args.sft.num_updates*args.eval_every_frac)
+    args.save_every = int(args.sft.num_updates*args.save_every_frac)
+    
 
     console = Console(force_terminal=True)
     run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -560,7 +565,7 @@ def train(args: Args):
     
 
     train_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='train')
-    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='test')
+    eval_dataloader = get_batch_loader(tokenizer, args, seed=local_seed, split='eval')
     
 
     def train_update(policy_state, input_ids, response_ids, sft_stats):
@@ -671,7 +676,7 @@ def train(args: Args):
     for update, [input_ids, response_ids] in tqdm(enumerate(train_dataloader)):
         if (args.local_rank == 0) and (update%args.eval_every==0) and (update > 0):
             losses = []
-            for eval_batch, [eval_input_ids, eval_response_ids] in enumerate(eval_dataloader):
+            for eval_batch, [eval_input_ids, eval_response_ids] in tqdm(enumerate(eval_dataloader)):
                 eval_input_ids = common_utils.shard(eval_input_ids)
                 eval_response_ids = common_utils.shard(eval_response_ids)
                 sft_stats, samples_to_print = p_eval(
