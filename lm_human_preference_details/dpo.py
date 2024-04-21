@@ -127,7 +127,7 @@ class Args:
     """Where to save the model"""
 
     task: TaskParams = field(default_factory=TaskParams)
-    train: DPOParams = field(default_factory=DPOParams)
+    dpo: DPOParams = field(default_factory=DPOParams)
 
     # distributed settings
     local_rank: int = 0
@@ -145,6 +145,73 @@ class Args:
     eval_every: int = 50
     save_every: int = 300
 
+def scale_by_adam_tf_style(
+    b1: float = 0.9,
+    b2: float = 0.999,
+    eps: float = 1e-8,
+    eps_root: float = 0.0,
+    mu_dtype=None,
+) -> base.GradientTransformation:
+    """Rescale updates according to the Adam algorithm.
+
+    References:
+      [Kingma et al, 2014](https://arxiv.org/abs/1412.6980)
+
+    Args:
+      b1: Decay rate for the exponentially weighted average of grads.
+      b2: Decay rate for the exponentially weighted average of squared grads.
+      eps: Term added to the denominator to improve numerical stability.
+      eps_root: Term added to the denominator inside the square-root to improve
+        numerical stability when backpropagating gradients through the rescaling.
+      mu_dtype: Optional `dtype` to be used for the first order accumulator; if
+        `None` then the `dtype` is inferred from `params` and `updates`.
+
+    Returns:
+      A `GradientTransformation` object.
+    """
+
+    mu_dtype = utils.canonicalize_dtype(mu_dtype)
+
+    def init_fn(params):
+        mu = jax.tree_util.tree_map(lambda t: jnp.zeros_like(t, dtype=mu_dtype), params)  # First moment
+        nu = jax.tree_util.tree_map(jnp.zeros_like, params)  # Second moment
+        return ScaleByAdamState(count=jnp.zeros([], jnp.int32), mu=mu, nu=nu)
+
+    def update_fn(updates, state, params=None):
+        del params
+        mu = update_moment(updates, state.mu, b1, 1)
+        nu = update_moment_per_elem_norm(updates, state.nu, b2, 2)
+        count_inc = numerics.safe_int32_increment(state.count)
+
+        ### `optax` default adam implementation
+        # mu_hat = bias_correction(mu, b1, count_inc)
+        # nu_hat = bias_correction(nu, b2, count_inc)
+        # updates = jax.tree_util.tree_map(
+        #     lambda m, v: m / (jnp.sqrt(v + eps_root) + eps), mu_hat, nu_hat)
+        ### Tensorflow adam implementation
+        updates = jax.tree_util.tree_map(
+            lambda m, v: (jnp.sqrt(1 - b2**count_inc) / (1 - b1**count_inc)) * m / (jnp.sqrt(v + eps_root) + eps),
+            mu,
+            nu,
+        )  #
+        mu = utils.cast_tree(mu, mu_dtype)
+        return updates, ScaleByAdamState(count=count_inc, mu=mu, nu=nu)
+
+    return base.GradientTransformation(init_fn, update_fn)
+
+
+def adam_tf_style(
+    learning_rate,
+    b1: float = 0.9,
+    b2: float = 0.999,
+    eps: float = 1e-8,
+    eps_root: float = 0.0,
+    mu_dtype=None,
+):
+    return combine.chain(
+        scale_by_adam_tf_style(b1=b1, b2=b2, eps=eps, eps_root=eps_root, mu_dtype=mu_dtype),
+        _scale_by_learning_rate(learning_rate),
+    )
 
 # a pytorch dataset
 class MyDPODataset(IterableDataset):
@@ -213,13 +280,174 @@ class MyDPODataset(IterableDataset):
             yield query_output["input_ids"], np.squeeze(response_output_pref["input_ids"]), np.squeeze(response_output_rej["input_ids"])
 
 
+def get_batch_loader(tokenizer, args, seed=0, split="train"):
+    dataset = MyDPODataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.dpo.batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+
+    return dataloader
+
+def get_batch_loader_eval(tokenizer, args, seed=0, split="train"):
+    dataset = MyDPODataset(
+        DATASET[args.task.query_dataset],
+        tokenizer,
+        args.task.query_length,
+        seed=seed,
+        start_text=args.task.start_text,
+        end_text=args.task.end_text,
+        split=split,
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.dpo.eval_batch_size,
+        collate_fn=numpy_collate,
+        drop_last=True
+    )
+
+    return dataloader
+
+
+def numpy_collate(batch):
+    if isinstance(batch[0], np.ndarray):
+        return np.stack(batch)
+    elif isinstance(batch[0], (tuple, list)):
+        transposed = zip(*batch)
+        return [numpy_collate(samples) for samples in transposed]
+    else:
+        return np.array(batch)
+
+
+def right_padding_to_left_padding(tokens, pad_id):
+    def pad_row(row):
+        mask = 1 - (row == pad_id)  # 1 if not pad_id, 0 if pad_id
+        return row[jnp.argsort(mask)]  # uses the fact that jnp.argsort is stable by default
+
+    return jax.vmap(pad_row)(tokens)
+
+
+def ceil_div(a, b):
+    return (a - 1) // b + 1
+
+
+def exact_div(a, b):
+    q = a // b
+    if a != q * b:
+        raise ValueError(f"Inexact division: {a} / {b} = {a / b}")
+    return q
+
 
 @flax.struct.dataclass
 class LMBackboneParams:
     """Parameters for the language model backbone."""
 
     lm_backbone_params: flax.core.FrozenDict
+    
+def model_policy_forward(
+        model,
+        input_ids: jnp.ndarray,
+    ):
+        """Get reward for input_ids."""
+        assert input_ids.ndim == 2
+        # shape: [batch_size, length]
 
+        # mask out padding tokens
+        attention_mask = input_ids != model.generation_config.pad_token_id
+        input_ids = jnp.where(attention_mask, input_ids, 0)
+
+        # assign position ids
+        position_ids = attention_mask.cumsum(1) - attention_mask
+
+        model_out = model.module.apply(
+            variables={"params": model.params},
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids
+        )
+
+        # shape: [batch_size, length, 1]
+        return model_out
+
+def prepare_policy_forward_and_policy_generate(args, tokenizer):
+    """Prepare the forward pass of the policy model and parameters."""
+
+    lm_backbone = FlaxAutoModelForCausalLM.from_pretrained(args.base_model)
+    # disable `pad_token_id` and `eos_token_id` because we just want to
+    # generate tokens without truncation / padding
+    lm_backbone.generation_config.eos_token_id = None
+    lm_backbone.generation_config.pad_token_id = tokenizer.pad_token_id
+
+    generation_config = GenerationConfig(
+        max_new_tokens=args.task.response_length,
+        temperature=args.task.temperature,
+        top_k=0.0,
+        top_p=1.0,
+        do_sample=True,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+
+    def policy_forward(
+        params: LMBackboneParams,
+        input_ids: jnp.ndarray,
+    ):
+        """Get reward for input_ids."""
+        assert input_ids.ndim == 2
+        # shape: [batch_size, length]
+
+        # mask out padding tokens
+        attention_mask = input_ids != tokenizer.pad_token_id
+        input_ids = jnp.where(attention_mask, input_ids, 0)
+
+        # assign position ids
+        position_ids = attention_mask.cumsum(1) - attention_mask
+
+        lm_backbone_out = lm_backbone.module.apply(
+            variables=params.lm_backbone_params,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids
+        )
+
+        # shape: [batch_size, length, 1]
+        return lm_backbone_out
+
+    def policy_generate(
+        params: LMBackboneParams,
+        queries: jnp.ndarray,
+    ):
+        input_ids = queries
+        attention_mask = input_ids != tokenizer.pad_token_id
+        input_ids = jnp.where(attention_mask, queries, 0)
+        output = lm_backbone.generate(
+            params=params["params"],
+            input_ids=input_ids,
+            generation_config=generation_config,
+            attention_mask=attention_mask.astype("i4"),
+            return_dict_in_generate=True,
+        )
+        query_length = input_ids.shape[1]
+        return jnp.concatenate((queries, output.sequences[:, query_length:]), axis=1)
+
+    key = jax.random.PRNGKey(args.seed)
+    key, init_key = jax.random.split(key, 2)
+    policy_params = LMBackboneParams(
+        lm_backbone_params=flax.core.FrozenDict({"params": lm_backbone.params})
+    )
+
+    return policy_forward, policy_generate, policy_params
 
 @flax.struct.dataclass
 class DPOStatistics(metrics.Collection):
@@ -283,7 +511,7 @@ def compute_loss(params,
         assert temp.ndim == 1
         # dpo_loss = jnp.sum(temp)
         
-        dpo_loss = -flax.linen.log_sigmoid(args.train.beta*temp)
+        dpo_loss = -flax.linen.log_sigmoid(args.dpo.beta*temp)
         
         dpo_loss_val = jnp.mean(dpo_loss)
 
@@ -347,27 +575,40 @@ def eval_step(
 
     return loss
 
+
+def linear_schedule(count, args):
+    # anneal learning rate linearly
+    frac = 1.0 - (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / args.dpo.num_updates
+    return args.dpo.lr * frac
+
+def linear_warmup_schedule(count, args):
+    frac = jnp.min(jnp.array([1.0, (count // (args.dpo.nminibatches * args.dpo.noptepochs)) / (args.dpo.num_warmup)]))
+    return args.dpo.lr * frac
+
+def cosine_schedule(count, args):
+    return optax.cosine_decay_schedule(init_value=args.dpo.lr, decay_steps = args.dpo.num_updates, alpha=0)(count)
+
 def train(args: Args):
     local_devices = jax.local_devices()
     global_devices = jax.devices()
-    args.train.world_size = jax.process_count()
+    args.dpo.world_size = jax.process_count()
     learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
     global_learner_devices = [
         global_devices[d_id + process_index * len(local_devices)]
-        for process_index in range(args.train.world_size)
+        for process_index in range(args.dpo.world_size)
         for d_id in args.learner_device_ids
     ]
     pprint({"global_learner_devices": global_learner_devices})
     args.global_learner_devices = [str(item) for item in global_learner_devices]
     args.learner_devices = [str(item) for item in learner_devices]
     args.local_rank = jax.process_index()
-    args.train.batch_size = int(args.train.local_batch_size * len(args.learner_devices) * args.train.world_size)
-    args.train.minibatch_size = exact_div(args.train.batch_size, args.train.nminibatches)
-    args.train.local_mini_batch_size = exact_div(args.train.local_batch_size, args.train.nminibatches)
-    args.train.local_micro_batch_size = exact_div(args.train.local_mini_batch_size, args.train.gradient_accumulation_steps)
-    # `per_rank_rollout_batch_size` is our `args.train.local_batch_size`
-    # `per_rank_minibatch_size` is our `args.train.local_mini_batch_size`
-    args.train.num_updates = args.train.total_episodes // args.train.batch_size
+    args.dpo.batch_size = int(args.dpo.local_batch_size * len(args.learner_devices) * args.dpo.world_size)
+    args.dpo.minibatch_size = exact_div(args.dpo.batch_size, args.dpo.nminibatches)
+    args.dpo.local_mini_batch_size = exact_div(args.dpo.local_batch_size, args.dpo.nminibatches)
+    args.dpo.local_micro_batch_size = exact_div(args.dpo.local_mini_batch_size, args.dpo.gradient_accumulation_steps)
+    # `per_rank_rollout_batch_size` is our `args.dpo.local_batch_size`
+    # `per_rank_minibatch_size` is our `args.dpo.local_mini_batch_size`
+    args.dpo.num_updates = args.dpo.total_episodes // args.dpo.batch_size
 
     console = Console(force_terminal=True)
     run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -427,11 +668,11 @@ def train(args: Args):
     
     print("policy param initialized")
 
-    if (args.train.opt_choice=="adam_tf"):
+    if (args.dpo.opt_choice=="adam_tf"):
         optim_choice = adam_tf_style
-    elif (args.train.opt_choice=="rmsprop"):
+    elif (args.dpo.opt_choice=="rmsprop"):
         optim_choice = optax.rmsprop
-    elif (args.train.opt_choice=="adamw"):
+    elif (args.dpo.opt_choice=="adamw"):
         optim_choice = optax.adamw
     else:
         optim_choice = optax.adam
@@ -440,9 +681,9 @@ def train(args: Args):
     optimizer = optax.MultiSteps(
         optax.inject_hyperparams(optim_choice)(
             learning_rate = functools.partial(linear_warmup_schedule, args=args), 
-            eps=args.train.eps,
+            eps=args.dpo.eps,
         ),
-        every_k_schedule=args.train.gradient_accumulation_steps,
+        every_k_schedule=args.dpo.gradient_accumulation_steps,
     )
     
     print("optimizer initialized")
@@ -469,7 +710,7 @@ def train(args: Args):
     
     dataloader = DataLoader(
         dataset,
-        batch_size=args.train.batch_size,
+        batch_size=args.dpo.batch_size,
         collate_fn=numpy_collate,
     )
     iter_dataloader = iter(dataloader)
@@ -501,20 +742,20 @@ def train(args: Args):
         def dpo_single_epoch(carry, inp):
             policy_state, dpo_stats, key = carry
             key, subkey = jax.random.split(key, 2)
-            perm = jax.random.permutation(key, args.train.local_batch_size)
+            perm = jax.random.permutation(key, args.dpo.local_batch_size)
             # That is -> query_responses, logprobs = inp
             
             # For both rejected and preferred query responses
             mbs_query_responses_pref = einops.rearrange(
                 query_responses_pref[perm],
                 "(c m) l -> c m l",
-                c=args.train.gradient_accumulation_steps,
+                c=args.dpo.gradient_accumulation_steps,
             )
 
             mbs_query_responses_rej = einops.rearrange(
                 query_responses_rej[perm],
                 "(c m) l -> c m l",
-                c=args.train.gradient_accumulation_steps,
+                c=args.dpo.gradient_accumulation_steps,
             )
 
             (policy_state, dpo_stats), _ = jax.lax.scan(
@@ -533,7 +774,7 @@ def train(args: Args):
             f=dpo_single_epoch,
             init=(policy_state, dpo_stats, key),
             xs=None,
-            length=args.train.noptepochs,
+            length=args.dpo.noptepochs,
         )
 
         dpo_stats = jax.lax.pmean(dpo_stats.compute(), "batch")
@@ -574,17 +815,17 @@ def train(args: Args):
         mbs_query_responses_pref = einops.rearrange(
                 query_responses_pref,
                 "(c m) l -> c m l",
-                c=args.train.eval_accum_steps,
+                c=args.dpo.eval_accum_steps,
         )
 
         mbs_query_responses_rej = einops.rearrange(
                 query_responses_rej,
                 "(c m) l -> c m l",
-                c=args.train.eval_accum_steps,
+                c=args.dpo.eval_accum_steps,
         )
 
         eval_epoch = jax.vmap(dpo_single_microbatch_eval, in_axes=0)
-        dpo_stats = jnp.sum(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
+        dpo_stats = jnp.mean(eval_epoch(mbs_query_responses_pref, mbs_query_responses_rej))
         dpo_stats = jax.lax.pmean(dpo_stats, "batch")
 
         samples_to_print = dict(
@@ -622,7 +863,7 @@ def train(args: Args):
                     policy_state=policy_state,
                     input_ids=eval_input_ids,
                     response_pref_ids=eval_response_pref_ids, 
-                    response_rej_ids=eval_response_pref_ids,
+                    response_rej_ids=eval_response_rej_ids,
                 )
                 losses.append(dpo_stats)
 
@@ -631,7 +872,7 @@ def train(args: Args):
             writer.add_scalar("dpo/eval_loss/total", loss, update)
 
     
-        global_step += args.train.batch_size
+        global_step += args.dpo.batch_size
         input_ids = common_utils.shard(input_ids)
 
         # For both responses
