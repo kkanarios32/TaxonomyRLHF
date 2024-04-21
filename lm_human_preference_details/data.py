@@ -46,6 +46,21 @@ def fam_rel_sft_generator(split, seed=0, shuffle=False):
         data = json.loads(data)
         yield data["query"], data["response"]
         
+def fam_rel_shuffled_resp_sft_generator(split, seed=0, shuffle=False):
+    assert split in ["eval", "train"]
+    file = os.path.join(dir, "fam_rel", f"fam_sft_{split}_data_shuffled.jsonl")
+
+    with open(file) as f:
+        datas = list(f)
+    
+    if shuffle:
+        random.seed(seed)
+        random.shuffle(datas)
+
+    for data in datas:
+        data = json.loads(data)
+        yield data["query"], data["response"]
+        
         
 def tldr_kto_random_generator(split="train", seed=0, shuffle=False): 
     """
