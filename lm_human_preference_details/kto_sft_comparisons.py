@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 system_mes = "You are mimicking a human rater who compares two summaries of a Reddit post provided to you, and chooses the better one as commanded by the user."
 
-user_mes_beginning = """"Which of the following summaries does a better job of summarizing the most \
+user_mes_beginning = """Which of the following summaries does a better job of summarizing the most \
 important points in the given forum post, without including unimportant or \
 irrelevant details? A good summary is both precise and concise. A concise but inaccurate summary is unhelpful. \
 Both summaries will typically be somewhat hard to parse and have many irrelevant or made-up statements. Choose the summary that is\
@@ -17,8 +17,8 @@ choice. Your response should use the format:
 Comparison: <one-sentence comparison and explanation>
 Preferred: <"A" or "B">"""
 
-with (open("kto.jsonl", "r") as kto_file):
-    with (open("sft.jsonl", "r") as sft_file):
+with (open("model_outputs/kto.jsonl", "r") as kto_file):
+    with (open("model_outputs/sft.jsonl", "r") as sft_file):
         with open("kto_sft_comparisons.txt", "a") as kto_sft_comparisons:
             kto_data = list(kto_file)
             sft_data = list(sft_file)
