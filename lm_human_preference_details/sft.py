@@ -51,7 +51,7 @@ class SFTParams:
     nminibatches: int = 1
     
     # Learning rate, epochs, episodes
-    total_episodes: int = 60000
+    total_episodes: int = 96000
     noptepochs: int = 1
     lr: float = 8e-5
     eps: float = 1e-6

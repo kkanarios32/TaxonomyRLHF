@@ -6,7 +6,6 @@ import json
 import os
 from datasets import load_dataset
 from tqdm import tqdm
-from utils import blobs
 
 dir = os.path.dirname(__file__)
 dir = os.path.join(dir, "datasets")
